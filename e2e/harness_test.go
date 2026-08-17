@@ -211,8 +211,10 @@ func run(t *testing.T, r *remote, extra ...string) *session {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, bin, args...)
 	// Keep the run from touching the developer's real config.
+	cfgDir := t.TempDir()
 	cmd.Env = append(os.Environ(),
-		"XDG_CONFIG_HOME="+t.TempDir(),
+		"XDG_CONFIG_HOME="+cfgDir,
+		"APPDATA="+cfgDir,
 		"HOME="+t.TempDir(),
 		"SSH_AUTH_SOCK=",
 	)

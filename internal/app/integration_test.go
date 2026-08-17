@@ -194,12 +194,19 @@ func startEcho(t *testing.T) string {
 
 // isolatedEnv gives the test its own HOME and config directory, with an SSH key
 // so the client has something to authenticate with.
+//
+// os.UserConfigDir reads a different variable on every platform — XDG_CONFIG_HOME
+// on Linux, HOME on macOS, APPDATA on Windows — so all three are set. Missing
+// one does not fail loudly: the test quietly reads and writes the developer's
+// real config instead, and leaks settings into the next test.
 func isolatedEnv(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
+	cfgDir := filepath.Join(home, ".config")
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CONFIG_HOME", cfgDir)
+	t.Setenv("APPDATA", cfgDir)
 	t.Setenv("SSH_AUTH_SOCK", "")
 
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {

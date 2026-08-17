@@ -258,6 +258,7 @@ func TestLegacyImportSkippedWhenConfigExists(t *testing.T) {
 func TestDefaultPath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("APPDATA", dir)
 	t.Setenv("HOME", dir)
 
 	got, err := DefaultPath()
@@ -273,7 +274,9 @@ func TestDefaultPath(t *testing.T) {
 }
 
 func TestOpenDefaultNeverFails(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("APPDATA", dir)
 	if s := OpenDefault(); s == nil {
 		t.Fatal("OpenDefault returned nil")
 	}

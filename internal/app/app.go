@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -212,7 +212,32 @@ type supervisor struct {
 	renderer Renderer
 	status   func(ui.StatusMsg)
 
+	// mu guards client, which the supervisor's own goroutine replaces while
+	// the UI goroutine may be shutting it down.
+	mu     sync.Mutex
 	client *sshx.Client
+}
+
+// currentClient returns the live connection, if there is one.
+func (s *supervisor) currentClient() *sshx.Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.client
+}
+
+func (s *supervisor) setClient(c *sshx.Client) {
+	s.mu.Lock()
+	s.client = c
+	s.mu.Unlock()
+}
+
+// takeClient detaches the current connection so it can be closed exactly once.
+func (s *supervisor) takeClient() *sshx.Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.client
+	s.client = nil
+	return c
 }
 
 // run owns the connection lifecycle until ctx is canceled.
@@ -221,7 +246,8 @@ func (s *supervisor) run(ctx context.Context) error {
 	attempt := 0
 
 	for ctx.Err() == nil {
-		if s.client == nil {
+		client := s.currentClient()
+		if client == nil {
 			attempt++
 			s.report(ui.StatusMsg{State: ui.Reconnecting, Attempt: attempt})
 			c, err := sshx.Connect(ctx, s.dest, s.connOpts)
@@ -236,7 +262,8 @@ func (s *supervisor) run(ctx context.Context) error {
 				backoff = nextBackoff(backoff)
 				continue
 			}
-			s.client = c
+			client = c
+			s.setClient(c)
 			s.mgr.SetDialer(c)
 		}
 
@@ -244,7 +271,7 @@ func (s *supervisor) run(ctx context.Context) error {
 		backoff = backoffStart
 		s.report(ui.StatusMsg{State: ui.Probing})
 
-		mon := probe.NewMonitor(s.client, s.cfg.Interval)
+		mon := probe.NewMonitor(client, s.cfg.Interval)
 		err := mon.Run(ctx,
 			func(info probe.Info) {
 				s.report(ui.StatusMsg{State: ui.Connected, Mode: string(info.Mode)})
@@ -255,9 +282,8 @@ func (s *supervisor) run(ctx context.Context) error {
 		)
 
 		s.mgr.SetDialer(nil)
-		if s.client != nil {
-			s.client.Close()
-			s.client = nil
+		if c := s.takeClient(); c != nil {
+			c.Close()
 		}
 		if ctx.Err() != nil {
 			return nil
@@ -287,8 +313,8 @@ func (s *supervisor) report(msg ui.StatusMsg) {
 }
 
 func (s *supervisor) close() {
-	if s.client != nil {
-		s.client.Close()
+	if c := s.takeClient(); c != nil {
+		c.Close()
 	}
 }
 

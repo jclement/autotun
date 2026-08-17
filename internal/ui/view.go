@@ -504,13 +504,12 @@ func (m *Model) rowText(s tunnel.State, act activity, local, arrow, remote, cmd 
 			reason = s.Err
 		}
 
-		procW, tailW := m.procWidth(), tailWidth()
-		// A long reason borrows width from the process column rather than
-		// being truncated, since the reason is the point of the row.
-		if over := ansi.StringWidth(reason) - tailW; over > 0 {
+		// A long reason borrows width from the process column, moving its start
+		// left so more of it fits before the frame edge.
+		procW := m.procWidth()
+		if over := ansi.StringWidth(reason) - tailWidth(); over > 0 {
 			if borrow := min(over, procW-minProc); borrow > 0 {
 				procW -= borrow
-				tailW += borrow
 			}
 		}
 

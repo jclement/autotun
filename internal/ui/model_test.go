@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/tunnel"
 )
 
@@ -16,18 +17,51 @@ type stubController struct {
 	mu       sync.Mutex
 	rows     []tunnel.State
 	policy   tunnel.Policy
-	toggled  []int
-	attached map[int]bool
+	modes    map[int]config.Mode
 	schemes  map[int]tunnel.Scheme
+	locals   map[int]int
+	localErr error
 }
 
 func newStub(rows ...tunnel.State) *stubController {
 	return &stubController{
-		rows:     rows,
-		policy:   tunnel.DefaultPolicy(),
-		attached: map[int]bool{},
-		schemes:  map[int]tunnel.Scheme{},
+		rows:    rows,
+		policy:  tunnel.DefaultPolicy(),
+		modes:   map[int]config.Mode{},
+		schemes: map[int]tunnel.Scheme{},
+		locals:  map[int]int{},
 	}
+}
+
+func (s *stubController) CycleMode(port int) config.Mode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.modes[port].Next()
+	s.modes[port] = next
+	for i := range s.rows {
+		if s.rows[i].RemotePort == port {
+			s.rows[i].Mode = next
+		}
+	}
+	return next
+}
+
+func (s *stubController) SetLocalPort(port, local int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.localErr != nil {
+		return s.localErr
+	}
+	s.locals[port] = local
+	for i := range s.rows {
+		if s.rows[i].RemotePort == port {
+			s.rows[i].PinnedLocal = local
+			if local > 0 {
+				s.rows[i].LocalPort = local
+			}
+		}
+	}
+	return nil
 }
 
 func (s *stubController) CycleScheme(port int) tunnel.Scheme {
@@ -47,14 +81,6 @@ func (s *stubController) States() []tunnel.State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]tunnel.State(nil), s.rows...)
-}
-
-func (s *stubController) Toggle(port int) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.toggled = append(s.toggled, port)
-	s.attached[port] = !s.attached[port]
-	return s.attached[port]
 }
 
 func (s *stubController) Policy() tunnel.Policy {
@@ -130,6 +156,8 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyCtrlC}
 	case "backspace":
 		return tea.KeyMsg{Type: tea.KeyBackspace}
+	case "ctrl+u":
+		return tea.KeyMsg{Type: tea.KeyCtrlU}
 	default:
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 	}
@@ -142,19 +170,49 @@ func send(m *Model, keys ...string) {
 	}
 }
 
-func TestModelStartsOnTheFirstRow(t *testing.T) {
+// Arriving with a row already highlighted implies you chose it; nothing is
+// selected until you move.
+func TestModelStartsWithNothingSelected(t *testing.T) {
 	m := newModel(t, newStub(row(3000, 3000, "node vite"), row(8080, 8080, "python3")))
-	if m.cursor != 0 {
-		t.Errorf("cursor = %d, want 0", m.cursor)
+	if m.cursor != noSelection {
+		t.Errorf("cursor = %d, want nothing selected", m.cursor)
 	}
-	if got, _ := m.selected(); got.RemotePort != 3000 {
-		t.Errorf("selected = %d, want 3000", got.RemotePort)
+	if _, ok := m.selected(); ok {
+		t.Error("a row is selected before the user moved")
+	}
+
+	send(m, "down")
+	if got, ok := m.selected(); !ok || got.RemotePort != 3000 {
+		t.Errorf("the first move should select the first row, got %d", got.RemotePort)
+	}
+}
+
+// Moving up from nothing wraps to the last row, which is what you want when
+// the thing you just started is at the bottom.
+func TestModelFirstMoveUpSelectsTheLastRow(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "a"), row(8080, 8080, "b")))
+	send(m, "up")
+	if got, _ := m.selected(); got.RemotePort != 8080 {
+		t.Errorf("selected %d, want the last row", got.RemotePort)
+	}
+}
+
+// Actions that need a row say so rather than doing nothing.
+func TestModelActionsWithoutASelection(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "node")))
+	for _, key := range []string{"o", "y", "a", "t", "l"} {
+		m.hasToast = false
+		send(m, key)
+		if !m.hasToast || !m.toast.Bad {
+			t.Errorf("%q with no selection should prompt for one", key)
+		}
 	}
 }
 
 func TestModelNavigation(t *testing.T) {
 	m := newModel(t, newStub(row(3000, 3000, "a"), row(4000, 4000, "b"), row(5000, 5000, "c")))
 
+	send(m, "j") // the first move selects the top row
 	send(m, "j")
 	if got, _ := m.selected(); got.RemotePort != 4000 {
 		t.Errorf("after j, selected %d, want 4000", got.RemotePort)
@@ -172,7 +230,7 @@ func TestModelNavigation(t *testing.T) {
 	if got, _ := m.selected(); got.RemotePort != 3000 {
 		t.Errorf("after k/up, selected %d, want 3000", got.RemotePort)
 	}
-	send(m, "k", "k")
+	send(m, "k", "k", "k")
 	if m.cursor != 0 {
 		t.Errorf("cursor ran off the top: %d", m.cursor)
 	}
@@ -188,9 +246,9 @@ func TestModelNavigation(t *testing.T) {
 
 func TestModelNavigationOnAnEmptyTable(t *testing.T) {
 	m := newModel(t, newStub())
-	send(m, "j", "k", "G", "g", "enter", "o", "y", "a")
-	if m.cursor != 0 {
-		t.Errorf("cursor = %d on an empty table, want 0", m.cursor)
+	send(m, "j", "k", "G", "g", "enter", "o", "y", "a", "l")
+	if m.cursor != noSelection {
+		t.Errorf("cursor = %d on an empty table, want nothing selected", m.cursor)
 	}
 	if strings.Contains(m.View(), "panic") {
 		t.Error("empty table should render cleanly")
@@ -327,8 +385,8 @@ func TestModelFilter(t *testing.T) {
 	))
 
 	send(m, "/")
-	if !m.filtering {
-		t.Fatal("/ should open the filter")
+	if m.editor != editorFilter {
+		t.Fatal("/ should open the search box")
 	}
 	send(m, "p", "y")
 	if m.query != "py" {
@@ -340,8 +398,8 @@ func TestModelFilter(t *testing.T) {
 
 	// Enter keeps the filter and closes the editor.
 	send(m, "enter")
-	if m.filtering {
-		t.Error("enter should close the filter editor")
+	if m.editing() {
+		t.Error("enter should close the search box")
 	}
 	if m.query != "py" {
 		t.Error("enter should keep the query")
@@ -365,23 +423,82 @@ func TestModelFilterMatchesPortNumbers(t *testing.T) {
 	}
 }
 
-func TestModelToggleAttach(t *testing.T) {
+func TestModelCycleMode(t *testing.T) {
 	stub := newStub(skippedRow(5432, "postgres", tunnel.SkipPreexising))
 	m := newModel(t, stub)
+	send(m, "down")
 
 	send(m, "a")
-	stub.mu.Lock()
-	toggled := append([]int(nil), stub.toggled...)
-	stub.mu.Unlock()
+	if got := stub.modes[5432]; got != config.ModeOn {
+		t.Errorf("after one a, mode = %q, want on", got)
+	}
+	if !strings.Contains(m.toast.Text, "5432") || !strings.Contains(m.toast.Text, "remembered") {
+		t.Errorf("toast = %q, should name the port and say it is remembered", m.toast.Text)
+	}
 
-	if len(toggled) != 1 || toggled[0] != 5432 {
-		t.Errorf("toggled = %v, want [5432]", toggled)
+	send(m, "a")
+	if got := stub.modes[5432]; got != config.ModeOff {
+		t.Errorf("after two a, mode = %q, want off", got)
 	}
-	if !m.hasToast {
-		t.Error("toggling should show feedback")
+	send(m, "a")
+	if got := stub.modes[5432]; got != config.ModeAuto {
+		t.Errorf("after three a, mode = %q, want auto", got)
 	}
-	if !strings.Contains(m.toast.Text, "5432") {
-		t.Errorf("toast = %q, should name the port", m.toast.Text)
+}
+
+func TestModelSetLocalPort(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
+	m := newModel(t, stub)
+	send(m, "down")
+
+	send(m, "l")
+	if m.editor != editorLocalPort {
+		t.Fatal("l should open the local port editor")
+	}
+	send(m, "1", "3", "0", "0", "0", "enter")
+
+	if got := stub.locals[3000]; got != 13000 {
+		t.Errorf("local port = %d, want 13000", got)
+	}
+	if m.editing() {
+		t.Error("enter should close the editor")
+	}
+	if !strings.Contains(m.toast.Text, "13000") {
+		t.Errorf("toast = %q, should confirm the port", m.toast.Text)
+	}
+
+	// Clearing the prefilled value resets it to the default.
+	send(m, "l", "ctrl+u", "enter")
+	if got, ok := stub.locals[3000]; !ok || got != 0 {
+		t.Errorf("local port = %d, want it reset to 0", got)
+	}
+}
+
+func TestModelSetLocalPortRejectsNonsense(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
+	m := newModel(t, stub)
+	send(m, "down")
+
+	send(m, "l", "n", "o", "p", "e", "enter")
+	if !m.toast.Bad {
+		t.Error("a non-numeric port should be reported")
+	}
+	if _, set := stub.locals[3000]; set {
+		t.Error("a bad value should not reach the controller")
+	}
+}
+
+func TestModelLocalPortEditorCanBeCancelled(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
+	m := newModel(t, stub)
+	send(m, "down")
+
+	send(m, "l", "9", "9", "esc")
+	if m.editing() {
+		t.Error("esc should close the editor")
+	}
+	if _, set := stub.locals[3000]; set {
+		t.Error("canceling should not change anything")
 	}
 }
 
@@ -403,17 +520,20 @@ func TestModelPauseTogglesPolicy(t *testing.T) {
 	}
 }
 
-func TestModelToggleExisting(t *testing.T) {
+func TestModelToggleView(t *testing.T) {
 	stub := newStub(skippedRow(5432, "postgres", tunnel.SkipPreexising))
 	m := newModel(t, stub)
 
 	send(m, "e")
 	if !stub.Policy().Existing {
-		t.Error("e should enable forwarding pre-existing ports")
+		t.Error("e should switch to the everything view")
+	}
+	if !strings.Contains(m.toast.Text, "everything") {
+		t.Errorf("toast = %q, should name the view", m.toast.Text)
 	}
 	send(m, "e")
 	if stub.Policy().Existing {
-		t.Error("e should toggle")
+		t.Error("e should toggle back")
 	}
 }
 
@@ -427,7 +547,7 @@ func TestModelOpenURL(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.reload()
 
-	send(m, "o")
+	send(m, "down", "o")
 	if len(opened) != 1 || opened[0] != "http://127.0.0.1:3000" {
 		t.Errorf("opened = %v, want the tunnel URL", opened)
 	}
@@ -435,7 +555,7 @@ func TestModelOpenURL(t *testing.T) {
 
 func TestModelOpenSkippedRowReportsNoTunnel(t *testing.T) {
 	m := newModel(t, newStub(skippedRow(5432, "postgres", tunnel.SkipPreexising)))
-	send(m, "o")
+	send(m, "down", "o")
 	if !m.toast.Bad {
 		t.Error("opening a row with no tunnel should report an error")
 	}
@@ -443,7 +563,7 @@ func TestModelOpenSkippedRowReportsNoTunnel(t *testing.T) {
 
 func TestModelCopyEmitsOSC52(t *testing.T) {
 	m := newModel(t, newStub(row(3000, 3000, "node")))
-	send(m, "y")
+	send(m, "down", "y")
 
 	if m.pendingOSC == "" {
 		t.Fatal("y should queue a clipboard sequence")
@@ -465,7 +585,7 @@ func TestModelCopyEmitsOSC52(t *testing.T) {
 func TestModelDetailOverlay(t *testing.T) {
 	m := newModel(t, newStub(row(3000, 3000, "node /app/server.js")))
 
-	send(m, "enter")
+	send(m, "down", "enter")
 	if !m.showDetail {
 		t.Fatal("enter should open the detail pane")
 	}
@@ -535,7 +655,7 @@ func TestModelReloadPreservesSelection(t *testing.T) {
 	stub := newStub(row(3000, 3000, "a"), row(8080, 8080, "b"))
 	m := newModel(t, stub)
 
-	send(m, "j") // select 8080
+	send(m, "j", "j") // select 8080
 
 	// A new lower-numbered service appears and shifts the row order.
 	stub.mu.Lock()

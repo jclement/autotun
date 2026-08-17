@@ -54,10 +54,10 @@ func (e *ConflictError) Unwrap() error { return e.Err }
 
 // Allocate opens a local listener for the given remote port.
 //
-// Preference order: the local port this remote port used previously (so a
-// reconnect does not invalidate open browser tabs), then the remote port
-// itself, then an ephemeral port.
-func (a *Allocator) Allocate(remotePort int) (net.Listener, bool, error) {
+// Preference order: the port the user pinned for this service, then the one it
+// used previously (so a reconnect does not invalidate open browser tabs), then
+// the remote port itself, then an ephemeral port.
+func (a *Allocator) Allocate(remotePort, preferred int) (net.Listener, bool, error) {
 	a.mu.Lock()
 	prev, hasPrev := a.sticky[remotePort]
 	a.mu.Unlock()
@@ -74,6 +74,11 @@ func (a *Allocator) Allocate(remotePort int) (net.Listener, bool, error) {
 		return ln, true
 	}
 
+	if preferred > 0 {
+		if ln, ok := try(preferred); ok {
+			return a.record(remotePort, ln), preferred != remotePort, nil
+		}
+	}
 	if hasPrev && prev != remotePort {
 		if ln, ok := try(prev); ok {
 			return a.record(remotePort, ln), true, nil

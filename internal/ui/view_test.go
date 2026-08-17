@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/tunnel"
 )
 
@@ -217,27 +218,6 @@ func TestViewSingularTunnelCount(t *testing.T) {
 	}
 }
 
-func TestFitLine(t *testing.T) {
-	got := fitLine("left", "right", 20)
-	if ansi.StringWidth(got) != 20 {
-		t.Errorf("fitLine width = %d, want 20: %q", ansi.StringWidth(got), got)
-	}
-	if !strings.HasPrefix(got, "left") || !strings.Contains(got, "right") {
-		t.Errorf("fitLine = %q", got)
-	}
-
-	// With no room, the right-hand side is dropped rather than wrapping.
-	if got := fitLine("aaaaaaaa", "bbbbbbbb", 10); got != "aaaaaaaa" {
-		t.Errorf("fitLine = %q, want the left side alone", got)
-	}
-	if got := fitLine("left", "", 20); got != "left" {
-		t.Errorf("fitLine with no right side = %q", got)
-	}
-	if got := fitLine("left", "right", 0); got != "left" {
-		t.Errorf("fitLine with no width = %q", got)
-	}
-}
-
 func TestOverlayCenterPreservesWidth(t *testing.T) {
 	base := strings.Repeat("abcdefghij", 8) // 80 cells
 	baseView := strings.Join([]string{base, base, base, base, base}, "\n")
@@ -354,5 +334,99 @@ func TestDissolveUsesSingleWidthGlyphs(t *testing.T) {
 		if w := ansi.StringWidth(string(r)); w != 1 {
 			t.Errorf("matrix rune %q is %d cells wide, want 1", string(r), w)
 		}
+	}
+}
+
+// The frame must be a closed box at every size, or the border characters
+// scatter through the table.
+func TestViewDrawsAClosedFrame(t *testing.T) {
+	rows := []tunnel.State{
+		row(3000, 3000, "node vite"),
+		skippedRow(5432, "postgres", tunnel.SkipPreexising),
+	}
+	for _, size := range [][2]int{{40, 10}, {80, 24}, {120, 30}, {200, 12}} {
+		m := newModel(t, newStub(rows...))
+		m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		m.reload()
+
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) != size[1] {
+			t.Errorf("at %dx%d the view is %d lines, want %d", size[0], size[1], len(lines), size[1])
+		}
+		for i, line := range lines {
+			plain := []rune(ansi.Strip(line))
+			if len(plain) == 0 {
+				t.Errorf("at %dx%d line %d is empty", size[0], size[1], i)
+				continue
+			}
+			first, last := string(plain[0]), string(plain[len(plain)-1])
+			var wantFirst, wantLast string
+			switch i {
+			case 0:
+				wantFirst, wantLast = cornerTL, cornerTR
+			case len(lines) - 1:
+				wantFirst, wantLast = cornerBL, cornerBR
+			case rowSeparatorLine:
+				wantFirst, wantLast = teeL, teeR
+			default:
+				wantFirst, wantLast = edgeV, edgeV
+			}
+			if first != wantFirst || last != wantLast {
+				t.Errorf("at %dx%d line %d starts %q ends %q, want %q/%q",
+					size[0], size[1], i, first, last, wantFirst, wantLast)
+			}
+		}
+	}
+}
+
+// rowSeparatorLine is the rule between the column header and the data.
+const rowSeparatorLine = 2
+
+func TestViewShowsTheModeColumn(t *testing.T) {
+	on := row(3000, 3000, "node")
+	on.Mode = config.ModeOn
+	off := skippedRow(5432, "postgres", tunnel.SkipOff)
+	off.Mode = config.ModeOff
+
+	m := newModel(t, newStub(on, off))
+	view := plainView(m)
+
+	if !strings.Contains(view, " M ") {
+		t.Errorf("the mode column header is missing:\n%s", view)
+	}
+	if !strings.Contains(view, "+") {
+		t.Error("an always-on port should be marked")
+	}
+	if !strings.Contains(view, "-") {
+		t.Error("a never-forward port should be marked")
+	}
+}
+
+func TestViewSearchAndViewChips(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
+	m := newModel(t, stub)
+
+	send(m, "/", "n", "o", "d", "e", "enter")
+	if !strings.Contains(plainView(m), "/node") {
+		t.Errorf("an active search should be shown:\n%s", plainView(m))
+	}
+
+	send(m, "e")
+	m.hasToast = false // the toast owns the bottom border while it is up
+	if !strings.Contains(plainView(m), "view: everything") {
+		t.Errorf("the active view should be shown:\n%s", plainView(m))
+	}
+}
+
+func TestViewEditorAppearsInTheBottomBorder(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "node")))
+	send(m, "down", "l")
+
+	view := plainView(m)
+	if !strings.Contains(view, "local port for remote 3000") {
+		t.Errorf("the local port editor is not shown:\n%s", view)
+	}
+	if !strings.Contains(view, "blank resets") {
+		t.Error("the editor should explain how to reset")
 	}
 }

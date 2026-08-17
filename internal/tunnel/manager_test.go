@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/probe"
 )
 
@@ -299,41 +300,126 @@ func TestManagerReleasesTheLocalPortOnTeardown(t *testing.T) {
 	}, "the local port to be released")
 }
 
-func TestManagerToggleAttachesAndDetaches(t *testing.T) {
+func TestManagerCycleModeAttachesAndDetaches(t *testing.T) {
 	m, _, _ := newTestManager(t, DefaultPolicy())
 
 	port := freePort(t)
 	m.Sync(snapshotOf(port)) // baseline, so it starts skipped
 
-	if !m.Toggle(port) {
-		t.Fatal("Toggle should have attached the skipped service")
+	if got := m.CycleMode(port); got != config.ModeOn {
+		t.Fatalf("first cycle = %q, want on", got)
 	}
 	st := stateFor(t, m, port)
-	if st.Status != StatusActive || !st.Manual {
-		t.Fatalf("after attach: status %q manual %v, want active/true", st.Status, st.Manual)
+	if st.Status != StatusActive || st.Mode != config.ModeOn {
+		t.Fatalf("after on: status %q mode %q, want active/on", st.Status, st.Mode)
 	}
 	if got := roundTrip(t, st.LocalPort, "up"); got != "UP" {
 		t.Errorf("round trip = %q, want UP", got)
 	}
 
-	if m.Toggle(port) {
-		t.Fatal("Toggle should have detached the active tunnel")
+	if got := m.CycleMode(port); got != config.ModeOff {
+		t.Fatalf("second cycle = %q, want off", got)
 	}
-	if st := stateFor(t, m, port); st.Status == StatusActive {
-		t.Error("service should no longer be active")
+	st = stateFor(t, m, port)
+	if st.Status == StatusActive {
+		t.Error("an off port should not be forwarded")
+	}
+	if st.Skip != SkipOff {
+		t.Errorf("skip reason = %q, want off", st.Skip)
 	}
 
-	// A manual override must survive later scans.
+	// A standing decision must survive later scans.
 	m.Sync(snapshotOf(port))
 	if st := stateFor(t, m, port); st.Status == StatusActive {
-		t.Error("a manual detach should stick across scans")
+		t.Error("an off port should stay off across scans")
+	}
+
+	// And a third cycle returns to following the policy.
+	if got := m.CycleMode(port); got != config.ModeAuto {
+		t.Fatalf("third cycle = %q, want auto", got)
+	}
+	if st := stateFor(t, m, port); st.Skip != SkipPreexising {
+		t.Errorf("back on auto the policy applies again, got %q", st.Skip)
 	}
 }
 
-func TestManagerToggleUnknownPortIsANoop(t *testing.T) {
+// "on" beats the policy, including a port the policy would filter out entirely.
+func TestManagerModeOnOverridesFiltering(t *testing.T) {
+	p := DefaultPolicy()
+	p.MinPort = 1024
+	m, _, _ := newTestManager(t, p)
+
+	port := freePort(t)
+	m.Sync(probe.Snapshot{})
+	snap := snapshotOf(port)
+	m.Sync(snap)
+
+	// Exclude it, which normally hides the row completely.
+	pol := m.Policy()
+	pol.Exclude, _ = ParsePortSet(fmt.Sprint(port))
+	m.SetPolicy(pol)
+	if len(m.States()) != 0 {
+		t.Fatalf("expected the excluded port to be hidden, got %+v", m.States())
+	}
+
+	// A standing "on" decision brings it back and forwards it anyway.
+	m.Sync(snap)
+	if got := m.CycleMode(port); got != config.ModeOn {
+		t.Fatalf("cycle = %q, want on", got)
+	}
+	if st := stateFor(t, m, port); st.Status != StatusActive {
+		t.Errorf("status = %q, want an explicit on to beat --exclude", st.Status)
+	}
+}
+
+func TestManagerCycleModeUnknownPortIsANoop(t *testing.T) {
 	m, _, _ := newTestManager(t, DefaultPolicy())
-	if m.Toggle(9999) {
-		t.Error("toggling an unknown port should report not-attached")
+	if got := m.CycleMode(9999); got != config.ModeAuto {
+		t.Errorf("cycling an unknown port = %q, want auto", got)
+	}
+}
+
+func TestManagerSetLocalPort(t *testing.T) {
+	m, _, _ := newTestManager(t, DefaultPolicy())
+
+	remote, pinned := freePort(t), freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(remote))
+
+	if err := m.SetLocalPort(remote, pinned); err != nil {
+		t.Fatalf("SetLocalPort: %v", err)
+	}
+	st := stateFor(t, m, remote)
+	if st.LocalPort != pinned {
+		t.Errorf("local port = %d, want the pinned %d", st.LocalPort, pinned)
+	}
+	if st.PinnedLocal != pinned {
+		t.Errorf("PinnedLocal = %d, want %d", st.PinnedLocal, pinned)
+	}
+	if got := roundTrip(t, pinned, "hi"); got != "HI" {
+		t.Errorf("round trip on the pinned port = %q, want HI", got)
+	}
+
+	// Zero restores the default of mirroring the remote port.
+	if err := m.SetLocalPort(remote, 0); err != nil {
+		t.Fatalf("SetLocalPort(0): %v", err)
+	}
+	if st := stateFor(t, m, remote); st.LocalPort != remote {
+		t.Errorf("local port = %d, want back to %d", st.LocalPort, remote)
+	}
+}
+
+func TestManagerSetLocalPortRejectsBadInput(t *testing.T) {
+	m, _, _ := newTestManager(t, DefaultPolicy())
+	port := freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(port))
+
+	if err := m.SetLocalPort(port, 70000); err == nil {
+		t.Error("an out-of-range port should be rejected")
+	}
+	if err := m.SetLocalPort(9999, 3000); err == nil {
+		t.Error("pinning an unlisted port should be rejected")
 	}
 }
 

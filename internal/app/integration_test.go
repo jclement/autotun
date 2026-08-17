@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jclement/autotun/internal/store"
+	"github.com/jclement/autotun/internal/config"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -579,7 +579,7 @@ func TestEndToEndRemembersSchemesAcrossRuns(t *testing.T) {
 	remote.transcript = transcriptFor(port)
 
 	// Pre-seed the store the way the `t` key would have.
-	path, err := store.DefaultPath()
+	path, err := config.DefaultPath()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,7 +587,8 @@ func TestEndToEndRemembersSchemesAcrossRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	host, _, _ := net.SplitHostPort(remote.addr())
-	if err = os.WriteFile(path, []byte(fmt.Sprintf(`{"%s:%d":"https"}`, host, port)), 0o600); err != nil {
+	body := fmt.Sprintf("hosts:\n  %s:\n    ports:\n      %d:\n        scheme: https\n", host, port)
+	if err = os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

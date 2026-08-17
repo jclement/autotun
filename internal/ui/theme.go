@@ -18,26 +18,28 @@ type Theme struct {
 	MatrixLit lipgloss.AdaptiveColor
 	MatrixDim lipgloss.AdaptiveColor
 
-	Title     lipgloss.Style
-	Host      lipgloss.Style
-	Meta      lipgloss.Style
-	Header    lipgloss.Style
-	Row       lipgloss.Style
-	RowSel    lipgloss.Style
-	Live      lipgloss.Style
-	Fresh     lipgloss.Style
-	Dim       lipgloss.Style
-	Faintest  lipgloss.Style
-	Good      lipgloss.Style
-	Warning   lipgloss.Style
-	Bad       lipgloss.Style
-	Key       lipgloss.Style
-	KeyDesc   lipgloss.Style
-	Box       lipgloss.Style
-	BoxTitle  lipgloss.Style
-	Label     lipgloss.Style
-	Value     lipgloss.Style
-	Separator lipgloss.Style
+	Title       lipgloss.Style
+	Host        lipgloss.Style
+	Meta        lipgloss.Style
+	Header      lipgloss.Style
+	Row         lipgloss.Style
+	RowSel      lipgloss.Style
+	Live        lipgloss.Style
+	Fresh       lipgloss.Style
+	Frame       lipgloss.Style
+	Accent2Text lipgloss.Style
+	Dim         lipgloss.Style
+	Faintest    lipgloss.Style
+	Good        lipgloss.Style
+	Warning     lipgloss.Style
+	Bad         lipgloss.Style
+	Key         lipgloss.Style
+	KeyDesc     lipgloss.Style
+	Box         lipgloss.Style
+	BoxTitle    lipgloss.Style
+	Label       lipgloss.Style
+	Value       lipgloss.Style
+	Separator   lipgloss.Style
 }
 
 // DefaultTheme is the phosphor-green look: green for live traffic, cyan for
@@ -66,6 +68,10 @@ func DefaultTheme() Theme {
 	// one you just started. Both earn a brighter treatment than the rest.
 	t.Live = lipgloss.NewStyle().Foreground(t.Accent).Bold(true)
 	t.Fresh = lipgloss.NewStyle().Foreground(t.Accent2)
+	// The frame is structure, not content: it should read as a quiet outline
+	// rather than competing with the data inside it.
+	t.Frame = lipgloss.NewStyle().Foreground(t.Faint)
+	t.Accent2Text = lipgloss.NewStyle().Foreground(t.Accent2)
 	t.Dim = lipgloss.NewStyle().Foreground(t.Muted)
 	t.Faintest = lipgloss.NewStyle().Foreground(t.Faint)
 	t.Good = lipgloss.NewStyle().Foreground(t.Accent)

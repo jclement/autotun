@@ -33,7 +33,7 @@ func TestAllocatePrefersTheRemotePortNumber(t *testing.T) {
 	a := NewAllocator("127.0.0.1", false)
 	port := freePort(t)
 
-	ln, remapped, err := a.Allocate(port)
+	ln, remapped, err := a.Allocate(port, 0)
 	if err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestAllocateFallsBackToEphemeral(t *testing.T) {
 	a := NewAllocator("127.0.0.1", false)
 	busy := occupy(t)
 
-	ln, remapped, err := a.Allocate(busy)
+	ln, remapped, err := a.Allocate(busy, 0)
 	if err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestAllocateSamePortRefusesToRemap(t *testing.T) {
 	a := NewAllocator("127.0.0.1", true)
 	busy := occupy(t)
 
-	ln, _, err := a.Allocate(busy)
+	ln, _, err := a.Allocate(busy, 0)
 	if err == nil {
 		ln.Close()
 		t.Fatal("want an error when the exact port is unavailable under --same-port")
@@ -92,14 +92,14 @@ func TestAllocateIsStickyAcrossReallocation(t *testing.T) {
 	a := NewAllocator("127.0.0.1", false)
 	busy := occupy(t)
 
-	first, _, err := a.Allocate(busy)
+	first, _, err := a.Allocate(busy, 0)
 	if err != nil {
 		t.Fatalf("first Allocate: %v", err)
 	}
 	assigned := LocalPort(first)
 	first.Close()
 
-	second, remapped, err := a.Allocate(busy)
+	second, remapped, err := a.Allocate(busy, 0)
 	if err != nil {
 		t.Fatalf("second Allocate: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestForgetDropsTheStickyAssignment(t *testing.T) {
 	a := NewAllocator("127.0.0.1", false)
 	busy := occupy(t)
 
-	first, _, err := a.Allocate(busy)
+	first, _, err := a.Allocate(busy, 0)
 	if err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestForgetDropsTheStickyAssignment(t *testing.T) {
 	first.Close()
 	a.Forget(busy)
 
-	second, _, err := a.Allocate(busy)
+	second, _, err := a.Allocate(busy, 0)
 	if err != nil {
 		t.Fatalf("Allocate after Forget: %v", err)
 	}
@@ -138,12 +138,64 @@ func TestForgetDropsTheStickyAssignment(t *testing.T) {
 	}
 }
 
+// A pinned local port is tried before anything else, and counts as a remap
+// when it differs from the remote port.
+func TestAllocateHonoursAPinnedPort(t *testing.T) {
+	a := NewAllocator("127.0.0.1", false)
+	remote, pinned := freePort(t), freePort(t)
+
+	ln, remapped, err := a.Allocate(remote, pinned)
+	if err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	defer ln.Close()
+
+	if got := LocalPort(ln); got != pinned {
+		t.Errorf("bound %d, want the pinned %d", got, pinned)
+	}
+	if !remapped {
+		t.Error("a pinned port that differs from the remote one is a remap")
+	}
+}
+
+// A pinned port that is busy falls back rather than failing the tunnel: some
+// forwarding beats none, and the remap marker says it happened.
+func TestAllocateFallsBackFromABusyPinnedPort(t *testing.T) {
+	a := NewAllocator("127.0.0.1", false)
+	remote, busy := freePort(t), occupy(t)
+
+	ln, _, err := a.Allocate(remote, busy)
+	if err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	defer ln.Close()
+
+	if got := LocalPort(ln); got != remote {
+		t.Errorf("bound %d, want a fallback to the remote port %d", got, remote)
+	}
+}
+
+// Pinning the remote port itself is not a remap.
+func TestAllocatePinnedToTheRemotePortIsNotARemap(t *testing.T) {
+	a := NewAllocator("127.0.0.1", false)
+	port := freePort(t)
+
+	ln, remapped, err := a.Allocate(port, port)
+	if err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	defer ln.Close()
+	if remapped {
+		t.Error("pinning a service to its own port number is not a remap")
+	}
+}
+
 func TestAllocateReportsListenFailure(t *testing.T) {
 	a := NewAllocator("127.0.0.1", false)
 	boom := errors.New("no sockets today")
 	a.listen = func(string, string) (net.Listener, error) { return nil, boom }
 
-	if _, _, err := a.Allocate(3000); !errors.Is(err, boom) {
+	if _, _, err := a.Allocate(3000, 0); !errors.Is(err, boom) {
 		t.Errorf("Allocate = %v, want the underlying listen error", err)
 	}
 }

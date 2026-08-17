@@ -64,6 +64,8 @@ const (
 	SkipNotInclude Skip = "not in --include"
 	SkipNotLoop    Skip = "not loopback-only"
 	SkipPaused     Skip = "paused"
+	// SkipOff is a standing user decision, not a policy outcome.
+	SkipOff Skip = "off"
 )
 
 // Filtered reports whether a skip reason means the service was ruled out by

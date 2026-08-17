@@ -2,9 +2,12 @@ package ui
 
 import (
 	"math/rand"
+	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/tunnel"
 )
 
@@ -12,8 +15,9 @@ import (
 // interface means the whole view layer is testable with a stub.
 type Controller interface {
 	States() []tunnel.State
-	Toggle(remotePort int) bool
+	CycleMode(remotePort int) config.Mode
 	CycleScheme(remotePort int) tunnel.Scheme
+	SetLocalPort(remotePort, local int) error
 	Policy() tunnel.Policy
 	SetPolicy(tunnel.Policy)
 }
@@ -74,6 +78,18 @@ type Options struct {
 	OpenURL func(string) error
 }
 
+// editorKind names the inline text entry currently open.
+type editorKind int
+
+const (
+	editorNone editorKind = iota
+	editorFilter
+	editorLocalPort
+)
+
+// noSelection is the cursor value meaning "nothing highlighted yet".
+const noSelection = -1
+
 // Model is the bubbletea model for autotun's table UI.
 type Model struct {
 	ctrl Controller
@@ -91,9 +107,11 @@ type Model struct {
 	sortKey SortKey
 	reverse bool
 
-	filtering bool
-	filter    textInput
-	query     string
+	// editor is the inline text entry shown in the bottom border.
+	editor     editorKind
+	editorPort int
+	input      textInput
+	query      string
 
 	showHelp   bool
 	showDetail bool
@@ -147,6 +165,9 @@ func New(ctrl Controller, opts Options) *Model {
 		height:  24,
 		status:  StatusMsg{State: Connecting},
 		rows:    ctrl.States(),
+		// Nothing is highlighted until you move: a selection bar on arrival
+		// implies you already chose something.
+		cursor: noSelection,
 	}
 }
 
@@ -158,6 +179,9 @@ func (m *Model) Init() tea.Cmd {
 func tick(d time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
 	return tea.Tick(d, fn)
 }
+
+// editing reports whether an inline text entry is open.
+func (m *Model) editing() bool { return m.editor != editorNone }
 
 // Err returns the error the UI exited with, if any.
 func (m *Model) Err() error { return m.fatal }
@@ -219,12 +243,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // doubleClickWindow is how close two clicks must be to count as a double click.
 const doubleClickWindow = 450 * time.Millisecond
 
-// Row indices of the fixed chrome, used for mouse hit-testing.
-const (
-	headerRow = 0 // title line
-	columnRow = 2 // column titles
-)
-
 // handleMouse routes clicks over the whole interface: the column headers sort,
 // the key bar runs its action, a row selects, the VIA cell cycles the
 // protocol, a double click opens, and an open overlay swallows the click.
@@ -265,10 +283,13 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	if m.confirming {
 		return nil
 	}
-	// While filtering, a click outside the editor commits the filter rather
-	// than silently editing something else.
-	if m.filtering {
-		m.filtering = false
+	// A click outside an open editor commits it rather than silently editing
+	// something else.
+	if m.editing() {
+		if m.editor == editorLocalPort {
+			return m.applyLocalPort()
+		}
+		m.closeEditor()
 		return nil
 	}
 
@@ -284,7 +305,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	}
 
 	// Clicking a column header sorts by it, and clicking it again reverses.
-	if msg.Y == columnRow {
+	if msg.Y == rowColHeader {
 		if c, ok := m.columnAt(msg.X); ok && c.sortable {
 			if m.sortKey == c.sort {
 				m.reverse = !m.reverse
@@ -304,11 +325,16 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	m.cursor = idx
 	m.clampCursor()
 
-	// The VIA cell is a control, not just a readout: clicking it cycles the
-	// protocol, which is the one per-row setting worth changing by hand.
-	if c, ok := m.columnAt(msg.X); ok && c.scheme {
-		m.lastClickPort = 0
-		return m.cycleScheme()
+	// The M and VIA cells are controls, not just readouts.
+	if c, ok := m.columnAt(msg.X); ok {
+		switch {
+		case c.mode:
+			m.lastClickPort = 0
+			return m.cycleMode()
+		case c.scheme:
+			m.lastClickPort = 0
+			return m.cycleScheme()
+		}
 	}
 
 	now := m.now()
@@ -325,7 +351,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 
 // overlayOpen reports whether a modal layer is covering the table.
 func (m *Model) overlayOpen() bool {
-	return m.confirming || m.showHelp || m.showDetail || m.filtering
+	return m.confirming || m.showHelp || m.showDetail || m.editing()
 }
 
 // isFooterRow reports whether y is the key bar.
@@ -351,10 +377,13 @@ func (m *Model) runAction(id string) tea.Cmd {
 	case "t":
 		return m.cycleScheme()
 	case "/":
-		m.filtering = true
-		m.filter.SetValue(m.query)
+		m.openFilter()
+	case "l":
+		return m.openLocalPort()
+	case "e":
+		return m.toggleView()
 	case "a":
-		return m.toggleSelected()
+		return m.cycleMode()
 	case "y":
 		return m.copySelected()
 	case "s":
@@ -385,6 +414,7 @@ func (m *Model) reload() {
 	m.rows = rows
 
 	if selected > 0 {
+		m.cursor = noSelection
 		for i, r := range rows {
 			if r.RemotePort == selected {
 				m.cursor = i
@@ -402,6 +432,33 @@ func (m *Model) selectedPort() int {
 	return 0
 }
 
+// move steps the selection, starting it at the first row if nothing is
+// highlighted yet.
+func (m *Model) move(delta int) {
+	if len(m.rows) == 0 {
+		m.cursor = noSelection
+		return
+	}
+	// Once a row is highlighted, moving stays within the table: stepping off
+	// the top should stop at the first row, not fall back to no selection.
+	target := 0
+	if m.cursor == noSelection {
+		if delta < 0 {
+			target = len(m.rows) - 1
+		}
+	} else {
+		target = m.cursor + delta
+	}
+	if target < 0 {
+		target = 0
+	}
+	if target >= len(m.rows) {
+		target = len(m.rows) - 1
+	}
+	m.cursor = target
+	m.clampCursor()
+}
+
 func (m *Model) selected() (tunnel.State, bool) {
 	if m.cursor >= 0 && m.cursor < len(m.rows) {
 		return m.rows[m.cursor], true
@@ -410,6 +467,14 @@ func (m *Model) selected() (tunnel.State, bool) {
 }
 
 func (m *Model) clampCursor() {
+	if len(m.rows) == 0 {
+		m.cursor, m.offset = noSelection, 0
+		return
+	}
+	if m.cursor == noSelection {
+		m.offset = 0
+		return
+	}
 	if m.cursor >= len(m.rows) {
 		m.cursor = len(m.rows) - 1
 	}
@@ -449,8 +514,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.confirming {
 		return m.handleConfirmKey(msg)
 	}
-	if m.filtering {
-		return m.handleFilterKey(msg)
+	if m.editing() {
+		return m.handleEditorKey(msg)
 	}
 	if m.showHelp {
 		switch msg.String() {
@@ -481,30 +546,91 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (m *Model) handleFilterKey(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
-	case "esc":
-		m.filtering = false
-		m.filter.Reset()
-		m.query = ""
-		m.reload()
+	case "esc", "ctrl+c":
+		kind := m.editor
+		m.closeEditor()
+		if kind == editorFilter {
+			m.query = ""
+			m.reload()
+		}
 		return nil
 	case "enter":
-		m.filtering = false
-		return nil
-	case "ctrl+c":
-		m.filtering = false
-		m.filter.Reset()
-		m.query = ""
-		m.reload()
+		if m.editor == editorLocalPort {
+			return m.applyLocalPort()
+		}
+		m.closeEditor()
 		return nil
 	}
-	if m.filter.Update(msg) {
-		m.query = m.filter.Value()
-		m.cursor = 0
+	if m.input.Update(msg) && m.editor == editorFilter {
+		m.query = m.input.Value()
+		m.cursor = noSelection
 		m.reload()
 	}
 	return nil
+}
+
+// closeEditor dismisses the inline editor.
+func (m *Model) closeEditor() {
+	m.editor = editorNone
+	m.editorPort = 0
+	m.input.Reset()
+}
+
+// openFilter starts a search.
+func (m *Model) openFilter() {
+	m.editor = editorFilter
+	m.input.SetValue(m.query)
+}
+
+// openLocalPort starts editing the selected row's local port.
+func (m *Model) openLocalPort() tea.Cmd {
+	st, ok := m.selected()
+	if !ok {
+		return m.needSelection()
+	}
+	m.editor = editorLocalPort
+	m.editorPort = st.RemotePort
+	if st.PinnedLocal > 0 {
+		m.input.SetValue(itoa(st.PinnedLocal))
+	} else {
+		m.input.SetValue("")
+	}
+	return nil
+}
+
+// applyLocalPort commits the local-port editor.
+func (m *Model) applyLocalPort() tea.Cmd {
+	text := strings.TrimSpace(m.input.Value())
+	port := m.editorPort
+	m.closeEditor()
+
+	local := 0
+	if text != "" {
+		n, err := strconv.Atoi(text)
+		if err != nil || n < 1 || n > 65535 {
+			return m.showToast(ToastMsg{Text: "not a port number: " + text, Bad: true})
+		}
+		local = n
+	}
+	if err := m.ctrl.SetLocalPort(port, local); err != nil {
+		m.reload()
+		return m.showToast(ToastMsg{Text: err.Error(), Bad: true})
+	}
+	m.reload()
+	if local == 0 {
+		return m.showToast(ToastMsg{Text: "remote " + itoa(port) + " back to its default local port"})
+	}
+	return m.showToast(ToastMsg{Text: "remote " + itoa(port) + " pinned to local " + itoa(local) + " (remembered)"})
+}
+
+// needSelection nudges the user when an action requires a highlighted row.
+func (m *Model) needSelection() tea.Cmd {
+	if len(m.rows) == 0 {
+		return nil
+	}
+	return m.showToast(ToastMsg{Text: "pick a row first — ↑↓ or click", Bad: true})
 }
 
 func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
@@ -519,17 +645,13 @@ func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case "up", "k":
-		m.cursor--
-		m.clampCursor()
+		m.move(-1)
 	case "down", "j":
-		m.cursor++
-		m.clampCursor()
+		m.move(1)
 	case "pgup", "ctrl+u":
-		m.cursor -= m.tableHeight()
-		m.clampCursor()
+		m.move(-m.tableHeight())
 	case "pgdown", "ctrl+d":
-		m.cursor += m.tableHeight()
-		m.clampCursor()
+		m.move(m.tableHeight())
 	case "home", "g":
 		m.cursor = 0
 		m.clampCursor()
@@ -546,9 +668,10 @@ func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
 		m.reload()
 
 	case "/":
-		m.filtering = true
-		m.filter.SetValue(m.query)
+		m.openFilter()
 		return nil
+	case "l":
+		return m.openLocalPort()
 
 	case "?":
 		m.showHelp = !m.showHelp
@@ -558,7 +681,7 @@ func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
 		}
 
 	case "a":
-		return m.toggleSelected()
+		return m.cycleMode()
 	case "t":
 		return m.cycleScheme()
 	case " ", "o":
@@ -570,29 +693,35 @@ func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
 	case "p":
 		return m.togglePause()
 	case "e":
-		return m.toggleExisting()
+		return m.toggleView()
 	}
 	return nil
 }
 
-func (m *Model) toggleSelected() tea.Cmd {
+// cycleMode steps the selected port through auto → on → off.
+func (m *Model) cycleMode() tea.Cmd {
 	st, ok := m.selected()
 	if !ok {
-		return nil
+		return m.needSelection()
 	}
-	attached := m.ctrl.Toggle(st.RemotePort)
+	mode := m.ctrl.CycleMode(st.RemotePort)
 	m.reload()
-	if attached {
-		return m.showToast(ToastMsg{Text: "attached remote " + itoa(st.RemotePort)})
+
+	switch mode {
+	case config.ModeOn:
+		return m.showToast(ToastMsg{Text: "remote " + itoa(st.RemotePort) + ": always forward (remembered)"})
+	case config.ModeOff:
+		return m.showToast(ToastMsg{Text: "remote " + itoa(st.RemotePort) + ": never forward (remembered)"})
+	default:
+		return m.showToast(ToastMsg{Text: "remote " + itoa(st.RemotePort) + ": back to automatic"})
 	}
-	return m.showToast(ToastMsg{Text: "detached remote " + itoa(st.RemotePort)})
 }
 
 // cycleScheme steps the selected row through unknown → http → https.
 func (m *Model) cycleScheme() tea.Cmd {
 	st, ok := m.selected()
 	if !ok {
-		return nil
+		return m.needSelection()
 	}
 	scheme := m.ctrl.CycleScheme(st.RemotePort)
 	m.reload()
@@ -605,7 +734,7 @@ func (m *Model) cycleScheme() tea.Cmd {
 func (m *Model) openSelected() tea.Cmd {
 	st, ok := m.selected()
 	if !ok {
-		return nil
+		return m.needSelection()
 	}
 	url := st.URL()
 	if url == "" {
@@ -620,7 +749,7 @@ func (m *Model) openSelected() tea.Cmd {
 func (m *Model) copySelected() tea.Cmd {
 	st, ok := m.selected()
 	if !ok {
-		return nil
+		return m.needSelection()
 	}
 	url := st.URL()
 	if url == "" {
@@ -641,15 +770,17 @@ func (m *Model) togglePause() tea.Cmd {
 	return m.showToast(ToastMsg{Text: "resumed"})
 }
 
-func (m *Model) toggleExisting() tea.Cmd {
+// toggleView switches between showing only what appeared since autotun
+// started and showing everything the host is listening on.
+func (m *Model) toggleView() tea.Cmd {
 	p := m.ctrl.Policy()
 	p.Existing = !p.Existing
 	m.ctrl.SetPolicy(p)
 	m.reload()
 	if p.Existing {
-		return m.showToast(ToastMsg{Text: "forwarding pre-existing ports too"})
+		return m.showToast(ToastMsg{Text: "view: everything (remembered for this host)"})
 	}
-	return m.showToast(ToastMsg{Text: "ignoring pre-existing ports"})
+	return m.showToast(ToastMsg{Text: "view: since start (remembered for this host)"})
 }
 
 // beginQuit starts the dissolve, or quits immediately when it is disabled.

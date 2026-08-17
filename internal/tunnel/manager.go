@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/probe"
 )
 
@@ -47,8 +49,11 @@ type State struct {
 	// being detected. Pinned choices are remembered between runs.
 	SchemePinned bool
 
-	Manual      bool
+	// Mode is the user's standing decision for this port.
+	Mode        config.Mode
 	Preexisting bool
+	// PinnedLocal is a local port the user chose, or zero.
+	PinnedLocal int
 
 	FirstSeen time.Time
 	Created   time.Time
@@ -114,7 +119,8 @@ type entry struct {
 	fwd         *forwarder
 	skip        Skip
 	err         string
-	manual      *bool // nil = follow policy; non-nil = user override
+	mode        config.Mode // auto follows policy; on and off are user decisions
+	pinnedLocal int         // a local port the user chose, or zero
 	preexisting bool
 	firstSeen   time.Time
 	missing     int
@@ -142,16 +148,16 @@ type Manager struct {
 	baseline map[int]bool
 	haveBase bool
 
-	host    string
-	schemes SchemeMemory
-	detect  bool
+	host     string
+	settings Settings
+	detect   bool
 }
 
-// SchemeMemory remembers the user's scheme choice for a remote port across
-// runs. *store.Store satisfies it.
-type SchemeMemory interface {
-	Get(host string, port int) (string, bool)
-	Set(host string, port int, value string)
+// Settings remembers per-port decisions across runs. *config.Store satisfies
+// it.
+type Settings interface {
+	Port(host string, port int) config.Port
+	SetPort(host string, port int, p config.Port)
 }
 
 // Options configures a Manager.
@@ -159,8 +165,8 @@ type Options struct {
 	Policy Policy
 	// Host names the remote for scheme memory lookups.
 	Host string
-	// Schemes, if set, persists the user's scheme choices.
-	Schemes SchemeMemory
+	// Settings, if set, persists the user's per-port decisions.
+	Settings Settings
 	// DetectSchemes enables the TLS probe on newly opened tunnels.
 	DetectSchemes bool
 	// Grace is how many consecutive scans a service may be absent before its
@@ -196,7 +202,7 @@ func New(alloc *Allocator, dialer Dialer, opts Options) *Manager {
 		entries:  map[int]*entry{},
 		baseline: map[int]bool{},
 		host:     opts.Host,
-		schemes:  opts.Schemes,
+		settings: opts.Settings,
 		detect:   opts.DetectSchemes,
 	}
 }
@@ -223,12 +229,14 @@ func (m *Manager) Sync(snap probe.Snapshot) {
 				preexisting: m.baseline[port],
 				firstSeen:   now,
 			}
-			// Restore whatever the user pinned for this port last time.
-			if m.schemes != nil {
-				if v, found := m.schemes.Get(m.host, port); found {
-					e.scheme = ParseScheme(v)
-					e.pinned = e.scheme != SchemeUnknown
-				}
+			// Restore whatever the user decided about this port last time.
+			e.mode = config.ModeAuto
+			if m.settings != nil {
+				saved := m.settings.Port(m.host, port)
+				e.scheme = ParseScheme(saved.Scheme)
+				e.pinned = e.scheme != SchemeUnknown
+				e.mode = config.ParseMode(saved.Mode)
+				e.pinnedLocal = saved.Local
 			}
 			m.entries[port] = e
 		}
@@ -280,7 +288,7 @@ func (m *Manager) applyLocked(e *entry, now time.Time) []Event {
 		return nil // link is down; Sync will retry once reconnected
 	}
 
-	ln, remapped, err := m.alloc.Allocate(e.svc.Port)
+	ln, remapped, err := m.alloc.Allocate(e.svc.Port, e.pinnedLocal)
 	if err != nil {
 		if e.err == err.Error() {
 			return nil // already reported; don't spam the log each scan
@@ -326,13 +334,10 @@ func (m *Manager) CycleScheme(remotePort int) Scheme {
 	// Cycling back to unknown releases the pin, so detection may run again on
 	// a later reconnect.
 	e.pinned = e.scheme != SchemeUnknown
-	scheme, host := e.scheme, m.host
-	memory := m.schemes
+	scheme := e.scheme
 	m.mu.Unlock()
 
-	if memory != nil {
-		memory.Set(host, remotePort, string(scheme))
-	}
+	m.persist(remotePort)
 	return scheme
 }
 
@@ -341,13 +346,14 @@ type want struct {
 	skip    Skip
 }
 
-// wantLocked applies the user's per-port override if present, otherwise policy.
+// wantLocked applies the user's standing decision for the port if there is
+// one, otherwise the policy.
 func (m *Manager) wantLocked(e *entry) want {
-	if e.manual != nil {
-		if *e.manual {
-			return want{forward: true}
-		}
-		return want{skip: "detached"}
+	switch e.mode {
+	case config.ModeOn:
+		return want{forward: true}
+	case config.ModeOff:
+		return want{skip: SkipOff}
 	}
 	skip := m.policy.Eval(e.svc, e.preexisting)
 	return want{forward: skip == SkipNone, skip: skip}
@@ -379,8 +385,9 @@ func (m *Manager) stateLocked(e *entry) State {
 		Binds:        e.svc.BindSummary(),
 		Skip:         e.skip,
 		Err:          e.err,
-		Manual:       e.manual != nil,
+		Mode:         e.mode,
 		Preexisting:  e.preexisting,
+		PinnedLocal:  e.pinnedLocal,
 		FirstSeen:    e.firstSeen,
 		Scheme:       e.scheme,
 		SchemePinned: e.pinned,
@@ -404,7 +411,7 @@ func (m *Manager) stateLocked(e *entry) State {
 		}
 	case e.err != "":
 		st.Status = StatusError
-	case m.dialer == nil && e.manual != nil && *e.manual:
+	case m.dialer == nil && e.mode == config.ModeOn:
 		st.Status = StatusOffline
 	default:
 		st.Status = StatusSkipped
@@ -413,9 +420,9 @@ func (m *Manager) stateLocked(e *entry) State {
 }
 
 // hiddenLocked reports whether an entry is filtered out of the table entirely.
-// A user override or a live tunnel always keeps a row visible.
+// A standing user decision or a live tunnel always keeps a row visible.
 func (m *Manager) hiddenLocked(e *entry) bool {
-	return e.fwd == nil && e.manual == nil && e.skip.Filtered()
+	return e.fwd == nil && e.mode == config.ModeAuto && e.skip.Filtered()
 }
 
 // States returns every service worth showing, ordered by remote port.
@@ -453,26 +460,83 @@ func (m *Manager) SetPolicy(p Policy) {
 	m.emit(events)
 }
 
-// Toggle flips the user's override for a port: an active tunnel is detached, a
-// skipped service is attached regardless of policy. Returns whether the port is
-// now attached.
-func (m *Manager) Toggle(remotePort int) bool {
+// CycleMode steps a port through auto → on → off and remembers the choice.
+func (m *Manager) CycleMode(remotePort int) config.Mode {
 	m.mu.Lock()
 	e, ok := m.entries[remotePort]
 	if !ok {
 		m.mu.Unlock()
-		return false
+		return config.ModeAuto
 	}
-	on := e.fwd == nil
-	e.manual = &on
-	if on {
-		e.err = "" // a manual attach is an explicit retry
+	e.mode = e.mode.Next()
+	if e.mode != config.ModeOff {
+		e.err = "" // choosing to forward is an explicit retry
 	}
 	events := m.applyLocked(e, m.now())
-	attached := e.fwd != nil
+	mode := e.mode
 	m.mu.Unlock()
+
+	m.persist(remotePort)
 	m.emit(events)
-	return attached
+	return mode
+}
+
+// SetLocalPort pins the local port a service is forwarded to. Zero restores
+// the default of mirroring the remote port. The tunnel is reopened so the
+// change takes effect immediately.
+func (m *Manager) SetLocalPort(remotePort, local int) error {
+	if local < 0 || local > 65535 {
+		return fmt.Errorf("local port %d is out of range", local)
+	}
+
+	m.mu.Lock()
+	e, ok := m.entries[remotePort]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("remote port %d is not listed", remotePort)
+	}
+	e.pinnedLocal = local
+	// Drop the remembered assignment so the new preference is not overruled
+	// by where this service happened to land last time.
+	m.alloc.Forget(remotePort)
+
+	var events []Event
+	if e.fwd != nil {
+		events = append(events, m.closeLocked(e, "relocating"))
+	}
+	e.err = ""
+	events = append(events, m.applyLocked(e, m.now())...)
+	failed := e.err
+	m.mu.Unlock()
+
+	m.persist(remotePort)
+	m.emit(events)
+	if failed != "" {
+		return errors.New(failed)
+	}
+	return nil
+}
+
+// persist writes a port's current decisions to the settings store.
+func (m *Manager) persist(remotePort int) {
+	if m.settings == nil {
+		return
+	}
+	m.mu.Lock()
+	e, ok := m.entries[remotePort]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	saved := config.Port{Mode: string(e.mode), Local: e.pinnedLocal}
+	if e.pinned {
+		saved.Scheme = string(e.scheme)
+	}
+	host := m.host
+	settings := m.settings
+	m.mu.Unlock()
+
+	settings.SetPort(host, remotePort, saved)
 }
 
 // SetDialer swaps the transport, used when the SSH link is re-established.

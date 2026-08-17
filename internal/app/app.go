@@ -14,9 +14,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jclement/autotun/internal/buildinfo"
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/probe"
 	"github.com/jclement/autotun/internal/sshx"
-	"github.com/jclement/autotun/internal/store"
 	"github.com/jclement/autotun/internal/tunnel"
 	"github.com/jclement/autotun/internal/ui"
 	"golang.org/x/term"
@@ -115,19 +115,26 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 		renderer = NewLogRenderer(iostreams.Out)
 	}
 
-	// Remembered http/https choices, keyed by host and remote port.
-	schemes := store.OpenDefault()
+	// Per-host settings: the view to open in, and each port's protocol,
+	// forwarding mode and pinned local port.
+	settings := config.OpenDefault()
+	host := dest.Label()
 	defer func() {
-		if err := schemes.Save(); err != nil {
-			fmt.Fprintln(iostreams.Err, "autotun: could not save remembered protocols:", err)
+		if err := settings.Save(); err != nil {
+			fmt.Fprintln(iostreams.Err, "autotun: could not save host settings:", err)
 		}
 	}()
+
+	// A remembered view wins unless --existing was passed explicitly.
+	if !cfg.Existing && settings.View(host) == config.ViewEverything {
+		policy.Existing = true
+	}
 
 	var prog *tea.Program
 	mgr := tunnel.New(alloc, client, tunnel.Options{
 		Policy:        policy,
-		Host:          dest.Label(),
-		Schemes:       schemes,
+		Host:          host,
+		Settings:      settings,
 		DetectSchemes: !cfg.NoDetect,
 		OnEvent: func(e tunnel.Event) {
 			renderer.Event(e)
@@ -156,8 +163,8 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 		return runHeadless(ctx, cancel, sup, iostreams)
 	}
 
-	model := ui.New(mgr, ui.Options{
-		Host:     dest.Label(),
+	model := ui.New(&uiController{Manager: mgr, settings: settings, host: host}, ui.Options{
+		Host:     host,
 		Version:  buildinfo.Version(),
 		Dissolve: !cfg.NoDissolve,
 	})
@@ -308,4 +315,22 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// uiController adapts the tunnel manager for the UI, persisting the choices
+// that belong to the host rather than to a single run.
+type uiController struct {
+	*tunnel.Manager
+	settings *config.Store
+	host     string
+}
+
+// SetPolicy records a view change so the host opens the same way next time.
+func (c *uiController) SetPolicy(p tunnel.Policy) {
+	view := config.ViewSinceStart
+	if p.Existing {
+		view = config.ViewEverything
+	}
+	c.settings.SetView(c.host, view)
+	c.Manager.SetPolicy(p)
 }

@@ -7,12 +7,14 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/tunnel"
 )
 
 // Column widths. PROCESS absorbs whatever is left over.
 const (
 	wMark = 1
+	wMode = 1
 	// The port columns carry a sort indicator on top of their title, so they
 	// are one cell wider than "REMOTE" needs on its own.
 	wLocal  = 7
@@ -24,9 +26,27 @@ const (
 	wBytes  = 8
 	gap     = 2
 	minProc = 12
+)
 
-	headerLines = 3 // title, blank, column header
-	footerLines = 2 // blank, keybar
+// Fixed rows of the frame, used for both drawing and mouse hit-testing.
+const (
+	rowColHeader = 1
+	rowFirstData = 3
+
+	headerLines = rowFirstData
+	footerLines = 1 // the bottom border carries the key bar
+)
+
+// Box-drawing pieces.
+const (
+	cornerTL = "╭"
+	cornerTR = "╮"
+	cornerBL = "╰"
+	cornerBR = "╯"
+	edgeH    = "─"
+	edgeV    = "│"
+	teeL     = "├"
+	teeR     = "┤"
 )
 
 // Recency windows for the activity marker. These are what make a busy table
@@ -82,31 +102,112 @@ func (m *Model) View() string {
 	return m.pendingOSC + view
 }
 
+// inner is the width available between the frame's side borders.
+func (m *Model) inner() int {
+	if m.width < 4 {
+		return 1
+	}
+	return m.width - 2
+}
+
 // baseView is the app without any overlay, and the frame the dissolve captures.
 func (m *Model) baseView() string {
 	var b strings.Builder
-	b.WriteString(m.headerView())
+	b.WriteString(m.topBorder())
+	b.WriteByte('\n')
+	b.WriteString(m.boxLine(m.th.Header.Render(m.columnHeader())))
+	b.WriteByte('\n')
+	b.WriteString(m.separator())
 	b.WriteByte('\n')
 	b.WriteString(m.tableView())
 	b.WriteByte('\n')
-	b.WriteString(m.footerView())
+	b.WriteString(m.bottomBorder())
 	return b.String()
 }
 
-// tableHeight is how many data rows fit on screen.
-func (m *Model) tableHeight() int {
-	h := m.height - headerLines - footerLines
-	if h < 1 {
-		return 1
+// boxLine wraps content in the frame's side borders, padding it to fit.
+func (m *Model) boxLine(content string) string {
+	edge := m.th.Frame.Render(edgeV)
+	w := ansi.StringWidth(content)
+	if w > m.inner() {
+		content = ansi.Truncate(content, m.inner(), "")
+		w = ansi.StringWidth(content)
 	}
-	return h
+	return edge + content + strings.Repeat(" ", m.inner()-w) + edge
 }
 
-func (m *Model) headerView() string {
+// rule draws a horizontal run of the frame's edge.
+func (m *Model) rule(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return m.th.Frame.Render(strings.Repeat(edgeH, n))
+}
+
+// borderWith composes a top or bottom border carrying a left and right label.
+// Labels are dropped rather than truncated when the frame is too narrow.
+func (m *Model) borderWith(left, right, lc, rc string) string {
 	t := m.th
-	title := t.Title.Render("autotun")
-	sep := t.Separator.Render(" ▸ ")
-	host := t.Host.Render(m.opts.Host)
+	lw, rw := ansi.StringWidth(left), ansi.StringWidth(right)
+	if lw > 0 {
+		lw += 2 // the spaces either side of the label
+	}
+	if rw > 0 {
+		rw += 2
+	}
+
+	// Two corners plus one edge segment beside each.
+	const fixed = 4
+	if fixed+lw+rw > m.width {
+		right, rw = "", 0
+	}
+	if fixed+lw > m.width {
+		left, lw = "", 0
+	}
+
+	var b strings.Builder
+	b.WriteString(t.Frame.Render(lc))
+	b.WriteString(m.rule(1))
+	if left != "" {
+		b.WriteString(" " + left + " ")
+	}
+	b.WriteString(m.rule(m.width - fixed - lw - rw))
+	if right != "" {
+		b.WriteString(" " + right + " ")
+	}
+	b.WriteString(m.rule(1))
+	b.WriteString(t.Frame.Render(rc))
+	return b.String()
+}
+
+func (m *Model) topBorder() string {
+	t := m.th
+	title := t.Title.Render("autotun") + t.Separator.Render(" ▸ ") + t.Host.Render(m.opts.Host)
+	return m.borderWith(title, m.statusLine(), cornerTL, cornerTR)
+}
+
+func (m *Model) separator() string {
+	t := m.th
+	return t.Frame.Render(teeL) + m.rule(m.inner()) + t.Frame.Render(teeR)
+}
+
+func (m *Model) bottomBorder() string {
+	if m.editing() {
+		return m.borderWith(m.editorLabel(), "", cornerBL, cornerBR)
+	}
+	if m.hasToast {
+		style := m.th.Good
+		if m.toast.Bad {
+			style = m.th.Bad
+		}
+		return m.borderWith(style.Render("▸ "+m.toast.Text), "", cornerBL, cornerBR)
+	}
+	return m.borderWith(m.keyBar(), m.viewChip(), cornerBL, cornerBR)
+}
+
+// statusLine is the connection and tunnel summary in the top border.
+func (m *Model) statusLine() string {
+	t := m.th
 
 	active, skipped, failed := 0, 0, 0
 	for _, r := range m.rows {
@@ -120,29 +221,19 @@ func (m *Model) headerView() string {
 		}
 	}
 
-	var right []string
-	right = append(right, m.statusChip())
-	// Paused is a mode, not an event, so it lives in the header where a
-	// transient footer toast can never hide it.
+	parts := []string{m.statusChip()}
 	if m.ctrl.Policy().Paused {
-		right = append(right, t.Warning.Render("PAUSED"))
+		parts = append(parts, t.Warning.Render("PAUSED"))
 	}
-	right = append(right, t.Good.Render(fmt.Sprintf("%d tunnel%s", active, plural(active))))
+	parts = append(parts, t.Good.Render(fmt.Sprintf("%d tunnel%s", active, plural(active))))
 	if skipped > 0 {
-		right = append(right, t.Meta.Render(fmt.Sprintf("%d idle", skipped)))
+		parts = append(parts, t.Meta.Render(fmt.Sprintf("%d idle", skipped)))
 	}
 	if failed > 0 {
-		right = append(right, t.Bad.Render(fmt.Sprintf("%d failed", failed)))
+		parts = append(parts, t.Bad.Render(fmt.Sprintf("%d failed", failed)))
 	}
-	right = append(right, t.Meta.Render(FormatUptime(m.now().Sub(m.started))))
-
-	left := title + sep + host
-	rightStr := strings.Join(right, t.Separator.Render(" · "))
-
-	line := fitLine(left, rightStr, m.width)
-
-	cols := t.Header.Render(m.columnHeader())
-	return line + "\n\n" + cols
+	parts = append(parts, t.Meta.Render(FormatUptime(m.now().Sub(m.started))))
+	return strings.Join(parts, t.Separator.Render(" · "))
 }
 
 // statusChip renders the connection indicator.
@@ -168,6 +259,19 @@ func (m *Model) statusChip() string {
 	}
 }
 
+// viewChip shows the active search and view mode in the bottom border.
+func (m *Model) viewChip() string {
+	t := m.th
+	var parts []string
+	if m.query != "" {
+		parts = append(parts, t.Accent2Text.Render("/"+m.query))
+	}
+	if m.ctrl.Policy().Existing {
+		parts = append(parts, t.Meta.Render("view: everything"))
+	}
+	return strings.Join(parts, t.Separator.Render(" · "))
+}
+
 // tailWidth is the combined width of the AGE, CONNS, IN and OUT columns, which
 // is the region a skipped row's reason occupies instead.
 func tailWidth() int {
@@ -175,8 +279,9 @@ func tailWidth() int {
 }
 
 func (m *Model) procWidth() int {
-	used := wMark + 1 + wLocal + gap + wArrow + gap + wRemote + gap + wScheme + gap + tailWidth()
-	w := m.width - used - gap - 1
+	used := 1 + wMark + 1 + wLocal + gap + wArrow + gap + wRemote + gap + wMode + gap +
+		wScheme + gap + tailWidth() + gap + 1
+	w := m.width - used
 	if w < minProc {
 		return minProc
 	}
@@ -187,19 +292,19 @@ func (m *Model) procWidth() int {
 // mouse hit-testing both read this, so a click always lands on the column the
 // user actually sees.
 type column struct {
-	title string
-	x     int // first cell
-	w     int
-	right bool    // right-aligned
-	sort  SortKey // what clicking the header sorts by
-	// sortable is false for columns with no meaningful ordering.
+	title    string
+	x        int // first cell, in terminal coordinates
+	w        int
+	right    bool    // right-aligned
+	sort     SortKey // what clicking the header sorts by
 	sortable bool
-	scheme   bool // clicking a cell in this column cycles the protocol
+	scheme   bool // clicking a cell here cycles the protocol
+	mode     bool // clicking a cell here cycles auto/on/off
 }
 
 // columns computes the table layout for the current width.
 func (m *Model) columns() []column {
-	x := wMark + 1
+	x := 1 + wMark + 1 // left border, activity marker, space
 	next := func(title string, w int, right bool, key SortKey, sortable bool) column {
 		c := column{title: title, x: x, w: w, right: right, sort: key, sortable: sortable}
 		x += w + gap
@@ -209,6 +314,7 @@ func (m *Model) columns() []column {
 		next("LOCAL", wLocal, true, SortLocal, true),
 		next("", wArrow, false, SortRemote, false),
 		next("REMOTE", wRemote, true, SortRemote, true),
+		next("M", wMode, false, SortRemote, false),
 		next("VIA", wScheme, false, SortRemote, false),
 		next("PROCESS", m.procWidth(), false, SortProcess, true),
 		next("AGE", wAge, true, SortAge, true),
@@ -216,7 +322,8 @@ func (m *Model) columns() []column {
 		next("IN", wBytes, true, SortTraffic, true),
 		next("OUT", wBytes, true, SortTraffic, true),
 	}
-	cols[3].scheme = true
+	cols[3].mode = true
+	cols[4].scheme = true
 	return cols
 }
 
@@ -256,7 +363,16 @@ func (m *Model) columnHeader() string {
 			b.WriteString(pad(title, c.w))
 		}
 	}
-	return clampWidth(b.String(), m.width)
+	return b.String()
+}
+
+// tableHeight is how many data rows fit on screen.
+func (m *Model) tableHeight() int {
+	h := m.height - headerLines - footerLines
+	if h < 1 {
+		return 1
+	}
+	return h
 }
 
 func (m *Model) tableView() string {
@@ -265,19 +381,18 @@ func (m *Model) tableView() string {
 		return m.emptyView(h)
 	}
 
-	var b strings.Builder
+	var lines []string
 	end := m.offset + h
 	if end > len(m.rows) {
 		end = len(m.rows)
 	}
 	for i := m.offset; i < end; i++ {
-		b.WriteString(m.rowView(m.rows[i], i == m.cursor))
-		b.WriteByte('\n')
+		lines = append(lines, m.boxLine(m.rowView(m.rows[i], i == m.cursor)))
 	}
-	for i := end - m.offset; i < h; i++ {
-		b.WriteByte('\n')
+	for len(lines) < h {
+		lines = append(lines, m.boxLine(""))
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return strings.Join(lines, "\n")
 }
 
 // emptyView explains the empty table rather than showing a blank rectangle.
@@ -292,14 +407,29 @@ func (m *Model) emptyView(h int) string {
 	default:
 		msg = "no services yet — start something on the remote and it will appear here"
 	}
+
 	lines := make([]string, h)
 	mid := h / 2
 	for i := range lines {
+		content := ""
 		if i == mid {
-			lines[i] = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, t.Faintest.Render(msg))
+			content = lipgloss.PlaceHorizontal(m.inner(), lipgloss.Center, t.Faintest.Render(msg))
 		}
+		lines[i] = m.boxLine(content)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// modeGlyph renders a port's standing decision.
+func modeGlyph(mode config.Mode) string {
+	switch mode {
+	case config.ModeOn:
+		return "+"
+	case config.ModeOff:
+		return "-"
+	default:
+		return " "
+	}
 }
 
 // rowView renders one service.
@@ -327,12 +457,12 @@ func (m *Model) rowView(s tunnel.State, selected bool) string {
 
 	act := activityOf(s, now)
 	line := m.rowText(s, act, local, arrow, remote, cmd, now)
-	line = clampWidth(line, m.width)
+	line = clampWidth(line, m.inner())
 
 	if selected {
-		// Pad the selection to the full width so the highlight is a bar.
-		if w := ansi.StringWidth(line); w < m.width {
-			line += strings.Repeat(" ", m.width-w)
+		// Pad the selection to the full inner width so the highlight is a bar.
+		if w := ansi.StringWidth(line); w < m.inner() {
+			line += strings.Repeat(" ", m.inner()-w)
 		}
 		return t.RowSel.Render(ansi.Strip(line))
 	}
@@ -354,6 +484,7 @@ func (m *Model) rowView(s tunnel.State, selected bool) string {
 // rowText lays out one row's columns without applying the row-level style.
 func (m *Model) rowText(s tunnel.State, act activity, local, arrow, remote, cmd string, now time.Time) string {
 	prefix := m.marker(act) + " "
+	mode := modeGlyph(s.Mode)
 
 	// Non-forwarding rows say why, in place of the traffic columns. The reason
 	// is right-aligned to the end of the row so it lines up into a column of
@@ -362,9 +493,6 @@ func (m *Model) rowText(s tunnel.State, act activity, local, arrow, remote, cmd 
 		reason := string(s.Skip)
 		if s.Status == tunnel.StatusError {
 			reason = s.Err
-		}
-		if s.Manual && reason == "" {
-			reason = "detached"
 		}
 
 		procW, tailW := m.procWidth(), tailWidth()
@@ -379,19 +507,20 @@ func (m *Model) rowText(s tunnel.State, act activity, local, arrow, remote, cmd 
 
 		return prefix + padLeft(local, wLocal) + strings.Repeat(" ", gap) + arrow +
 			strings.Repeat(" ", gap) + padLeft(remote, wRemote) + strings.Repeat(" ", gap) +
+			mode + strings.Repeat(" ", gap) +
 			pad(s.Scheme.Label(), wScheme) + strings.Repeat(" ", gap) +
 			pad(cmd, procW) + strings.Repeat(" ", gap) + padLeft(reason, tailW)
 	}
 
-	conns := itoa(s.ActiveConns)
 	cols := []string{
 		padLeft(local, wLocal),
 		arrow,
 		padLeft(remote, wRemote),
+		mode,
 		pad(s.Scheme.Label(), wScheme),
 		pad(cmd, m.procWidth()),
 		padLeft(FormatAge(now.Sub(s.Created)), wAge),
-		padLeft(conns, wConns),
+		padLeft(itoa(s.ActiveConns), wConns),
 		padLeft(FormatBytes(s.BytesIn), wBytes),
 		padLeft(FormatBytes(s.BytesOut), wBytes),
 	}
@@ -411,45 +540,35 @@ func (m *Model) marker(act activity) string {
 	}
 }
 
-func (m *Model) footerView() string {
+// editorLabel renders the inline editor shown in the bottom border.
+func (m *Model) editorLabel() string {
 	t := m.th
-	if m.filtering {
-		return "\n " + t.Key.Render("filter") + t.Meta.Render(" ▸ ") + m.filter.Render(t) +
-			t.Faintest.Render("   enter to keep · esc to clear")
+	var prompt, hint string
+	switch m.editor {
+	case editorFilter:
+		prompt, hint = "search", "enter to keep · esc to clear"
+	case editorLocalPort:
+		prompt = fmt.Sprintf("local port for remote %d", m.editorPort)
+		hint = "blank resets · enter to apply · esc to cancel"
 	}
-	if m.hasToast {
-		style := t.Good
-		if m.toast.Bad {
-			style = t.Bad
-		}
-		return "\n " + style.Render("▸ "+m.toast.Text)
-	}
+	return t.Key.Render(prompt) + t.Meta.Render(" ▸ ") + m.input.Render(t) +
+		t.Faintest.Render("   "+hint)
+}
 
-	// Ordered by how much you would miss it: whatever does not fit is dropped
-	// from the end, a whole hint at a time. Truncating mid-word would leave
-	// something like "esc q", which reads as a different key.
+// keyBar renders the clickable key hints, dropping whole entries that do not
+// fit rather than truncating one mid-word.
+func (m *Model) keyBar() string {
+	t := m.th
+
+	// Ordered by how much you would miss it.
 	keys := [][2]string{
 		{"↑↓", "move"}, {"esc", "quit"}, {"?", "help"}, {"enter", "detail"},
-		{"o", "open"}, {"t", "http/s"}, {"/", "filter"}, {"a", "attach"},
-		{"y", "copy"}, {"s", "sort"},
+		{"o", "open"}, {"a", "auto/on/off"}, {"t", "http/s"}, {"l", "local port"},
+		{"/", "search"}, {"y", "copy"}, {"e", "view"}, {"s", "sort"},
 	}
 
-	var flags []string
-	if m.query != "" {
-		flags = append(flags, t.Meta.Render("/"+m.query))
-	}
-	if m.reverse {
-		flags = append(flags, t.Meta.Render("↑"+m.sortKey.String()))
-	} else if m.sortKey != SortRemote {
-		flags = append(flags, t.Meta.Render("↓"+m.sortKey.String()))
-	}
-	right := strings.Join(flags, t.Faintest.Render(" · "))
-
-	// Reserve room for the right-hand indicators plus the separating space.
-	budget := m.width - 1
-	if right != "" {
-		budget -= ansi.StringWidth(right) + 2
-	}
+	// Reserve room for the right-hand chip plus the border decorations.
+	budget := m.width - 6 - ansi.StringWidth(m.viewChip())
 
 	sep := t.Faintest.Render(" · ")
 	var bar strings.Builder
@@ -469,16 +588,15 @@ func (m *Model) footerView() string {
 			bar.WriteString(sep)
 		}
 		bar.WriteString(hint)
-		// The leading space in the rendered bar shifts everything by one.
+		// The bar starts after "╰─ ", three cells in.
 		m.footerZones = append(m.footerZones, zone{
-			x0: 1 + used + lead,
-			x1: 1 + used + lead + width,
+			x0: 3 + used + lead,
+			x1: 3 + used + lead + width,
 			id: k[0],
 		})
 		used += lead + width
 	}
-
-	return "\n" + fitLine(" "+bar.String(), right, m.width)
+	return bar.String()
 }
 
 // zone is a clickable span on a single line.
@@ -489,25 +607,6 @@ type zone struct {
 
 // contains reports whether x falls inside the zone.
 func (z zone) contains(x int) bool { return x >= z.x0 && x < z.x1 }
-
-// fitLine puts left and right on one line of the given width, dropping the
-// right-hand side when there is no room for it.
-func fitLine(left, right string, width int) string {
-	lw, rw := ansi.StringWidth(left), ansi.StringWidth(right)
-	if width <= 0 {
-		return left
-	}
-	if rw == 0 {
-		return clampWidth(left, width)
-	}
-	if lw+rw+2 > width {
-		if lw > width {
-			return clampWidth(left, width)
-		}
-		return left
-	}
-	return left + strings.Repeat(" ", width-lw-rw-1) + right + " "
-}
 
 func (m *Model) confirmBox() string {
 	t := m.th
@@ -528,7 +627,7 @@ func (m *Model) detailBox() string {
 		if value == "" {
 			return ""
 		}
-		return t.Label.Render(pad(label, 12)) + t.Value.Render(value) + "\n"
+		return t.Label.Render(pad(label, 13)) + t.Value.Render(value) + "\n"
 	}
 
 	var b strings.Builder
@@ -544,6 +643,11 @@ func (m *Model) detailBox() string {
 	if s.Skip != "" {
 		b.WriteString(row("reason", string(s.Skip)))
 	}
+	b.WriteString(row("mode", string(s.Mode)))
+	if s.PinnedLocal > 0 {
+		b.WriteString(row("pinned to", fmt.Sprintf("local %d", s.PinnedLocal)))
+	}
+	b.WriteString(row("protocol", s.Scheme.Label()))
 	b.WriteString(row("command", s.Cmd))
 	if s.PID > 0 {
 		b.WriteString(row("pid", itoa(s.PID)))
@@ -577,26 +681,27 @@ func (m *Model) helpBox() string {
 		{"navigate", [][2]string{
 			{"↑ ↓ / j k", "move"},
 			{"g / G", "first / last"},
-			{"pgup / pgdn", "page"},
-			{"/", "filter by port or process"},
+			{"/", "search by port or process"},
 			{"s / r", "cycle sort / reverse"},
 		}},
-		{"act", [][2]string{
+		{"a port", [][2]string{
 			{"enter, d", "detail"},
 			{"o, space", "open in browser"},
-			{"t", "set http / https (remembered)"},
+			{"a", "auto → on → off (remembered)"},
+			{"t", "http / https (remembered)"},
+			{"l", "set the local port (remembered)"},
 			{"y", "copy URL to clipboard"},
-			{"a", "attach / detach this port"},
-			{"e", "toggle pre-existing ports"},
+		}},
+		{"everything", [][2]string{
+			{"e", "view: since start / everything"},
 			{"p", "pause automatic forwarding"},
 		}},
 		{"mouse", [][2]string{
 			{"click", "select a row"},
 			{"double click", "open in browser"},
-			{"click VIA", "cycle http / https"},
+			{"click M / VIA", "cycle mode / protocol"},
 			{"click header", "sort by that column"},
 			{"click keybar", "run that action"},
-			{"wheel", "scroll"},
 		}},
 		{"leave", [][2]string{
 			{"esc, q", "quit (asks first)"},
@@ -610,7 +715,7 @@ func (m *Model) helpBox() string {
 	for _, sec := range sections {
 		b.WriteString("\n" + t.Meta.Render(sec.title) + "\n")
 		for _, k := range sec.keys {
-			b.WriteString("  " + t.Key.Render(pad(k[0], 12)) + t.KeyDesc.Render(k[1]) + "\n")
+			b.WriteString("  " + t.Key.Render(pad(k[0], 14)) + t.KeyDesc.Render(k[1]) + "\n")
 		}
 	}
 	b.WriteString("\n" + t.Faintest.Render("? or esc to close"))
@@ -662,5 +767,3 @@ func overlayCenter(base, box string, width, height int) string {
 	}
 	return strings.Join(baseLines, "\n")
 }
-
-var _ = time.Now

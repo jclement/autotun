@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/tunnel"
 )
 
@@ -149,7 +150,7 @@ func TestModelSchemeCycle(t *testing.T) {
 	stub := newStub(row(3000, 3000, "node"))
 	m := newModel(t, stub)
 
-	send(m, "t")
+	send(m, "down", "t")
 	if got := stub.schemes[3000]; got != tunnel.SchemeHTTP {
 		t.Errorf("after one t, scheme = %q, want http", got)
 	}
@@ -178,7 +179,7 @@ func TestModelSchemeChangesTheOpenedURL(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.reload()
 
-	send(m, "t", "t") // -> https
+	send(m, "down", "t", "t") // -> https
 	send(m, "o")
 
 	if len(opened) != 1 || opened[0] != "https://127.0.0.1:3000" {
@@ -198,7 +199,7 @@ func TestModelSpaceOpensWithTheAssumedScheme(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.reload()
 
-	send(m, " ")
+	send(m, "down", " ")
 	if len(opened) != 1 || opened[0] != "http://127.0.0.1:3000" {
 		t.Errorf("opened = %v, want http assumed for an unknown scheme", opened)
 	}
@@ -302,23 +303,25 @@ func TestModelMouseWheelScrolls(t *testing.T) {
 	wheel := func(b tea.MouseButton) tea.MouseMsg {
 		return tea.MouseMsg{Action: tea.MouseActionPress, Button: b}
 	}
+	// The first wheel event selects the top row, so five steps land on index 4.
 	for i := 0; i < 5; i++ {
 		m.Update(wheel(tea.MouseButtonWheelDown))
 	}
-	if m.cursor != 5 {
-		t.Errorf("cursor = %d after 5 wheel-downs, want 5", m.cursor)
+	if m.cursor != 4 {
+		t.Errorf("cursor = %d after 5 wheel-downs, want 4", m.cursor)
 	}
 	for i := 0; i < 3; i++ {
 		m.Update(wheel(tea.MouseButtonWheelUp))
 	}
-	if m.cursor != 2 {
-		t.Errorf("cursor = %d after 3 wheel-ups, want 2", m.cursor)
+	if m.cursor != 1 {
+		t.Errorf("cursor = %d after 3 wheel-ups, want 1", m.cursor)
 	}
 }
 
 // The mouse must not act while a modal layer owns the screen.
 func TestModelMouseIgnoredDuringModals(t *testing.T) {
 	m := newModel(t, newStub(row(3000, 3000, "a"), row(4000, 4000, "b")))
+	send(m, "down") // select the first row
 
 	send(m, "esc") // confirmation open
 	m.Update(mouseAt(headerLines + 1))
@@ -352,7 +355,7 @@ func columnX(m *Model, title string) int {
 func TestModelClickColumnHeaderSorts(t *testing.T) {
 	m := newModel(t, newStub(row(3000, 100, "a"), row(8080, 200, "b")))
 
-	m.Update(clickAt(columnX(m, "PROCESS"), columnRow))
+	m.Update(clickAt(columnX(m, "PROCESS"), rowColHeader))
 	if m.sortKey != SortProcess {
 		t.Errorf("clicking PROCESS sorted by %q, want process", m.sortKey)
 	}
@@ -361,12 +364,12 @@ func TestModelClickColumnHeaderSorts(t *testing.T) {
 	}
 
 	// Clicking the active column again reverses it.
-	m.Update(clickAt(columnX(m, "PROCESS"), columnRow))
+	m.Update(clickAt(columnX(m, "PROCESS"), rowColHeader))
 	if !m.reverse {
 		t.Error("clicking the active sort column should reverse it")
 	}
 
-	m.Update(clickAt(columnX(m, "LOCAL"), columnRow))
+	m.Update(clickAt(columnX(m, "LOCAL"), rowColHeader))
 	if m.sortKey != SortLocal || m.reverse {
 		t.Errorf("clicking LOCAL gave %q reverse=%v", m.sortKey, m.reverse)
 	}
@@ -382,6 +385,20 @@ func TestViewHeaderMarksTheSortColumn(t *testing.T) {
 	send(m, "r")
 	if !strings.Contains(plainView(m), "↑LOCAL") {
 		t.Errorf("the reverse indicator is missing:\n%s", plainView(m))
+	}
+}
+
+func TestModelClickModeCellCyclesMode(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
+	m := newModel(t, stub)
+
+	m.Update(clickAt(columnX(m, "M"), headerLines))
+	if got := stub.modes[3000]; got != config.ModeOn {
+		t.Errorf("clicking M gave %q, want on", got)
+	}
+	m.Update(clickAt(columnX(m, "M"), headerLines))
+	if got := stub.modes[3000]; got != config.ModeOff {
+		t.Errorf("clicking M again gave %q, want off", got)
 	}
 }
 
@@ -443,18 +460,19 @@ func TestModelClickFooterActions(t *testing.T) {
 	m.reload()
 	footerY := m.height - 1
 
-	// Filter
+	// Search
 	m.Update(clickAt(footerZoneX(t, m, "/"), footerY))
-	if !m.filtering {
-		t.Error("clicking / should open the filter")
+	if m.editor != editorFilter {
+		t.Error("clicking / should open the search box")
 	}
-	// A click elsewhere commits the filter rather than editing blindly.
+	// A click elsewhere commits it rather than editing blindly.
 	m.Update(clickAt(1, headerLines))
-	if m.filtering {
-		t.Error("clicking away should close the filter editor")
+	if m.editing() {
+		t.Error("clicking away should close the search box")
 	}
 
 	// Detail
+	m.Update(clickAt(1, headerLines)) // select a row
 	m.Update(clickAt(footerZoneX(t, m, "enter"), footerY))
 	if !m.showDetail {
 		t.Error("clicking enter should open the detail pane")
@@ -472,13 +490,14 @@ func TestModelClickFooterActions(t *testing.T) {
 	}
 	m.Update(clickAt(1, headerLines))
 
-	// Attach
+	// Mode
+	m.Update(clickAt(1, headerLines)) // select a row first
 	m.Update(clickAt(footerZoneX(t, m, "a"), footerY))
 	stub.mu.Lock()
-	toggled := len(stub.toggled)
+	mode := stub.modes[3000]
 	stub.mu.Unlock()
-	if toggled != 1 {
-		t.Errorf("clicking a toggled %d times, want 1", toggled)
+	if mode != config.ModeOn {
+		t.Errorf("clicking a gave mode %q, want on", mode)
 	}
 
 	// Quit asks for confirmation rather than exiting on a stray click.
@@ -517,7 +536,7 @@ func TestModelWheelIgnoredUnderOverlays(t *testing.T) {
 	send(m, "?")
 	wheel := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
 	m.Update(wheel)
-	if m.cursor != 0 {
+	if m.cursor != noSelection {
 		t.Error("the wheel should not scroll the table under an overlay")
 	}
 }

@@ -2,11 +2,16 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/sshx"
 	"github.com/jclement/autotun/internal/tunnel"
 )
@@ -204,4 +209,64 @@ func TestSleepCtxReturnsEarlyOnCancel(t *testing.T) {
 	if !sleepCtx(t.Context(), time.Millisecond) {
 		t.Error("sleepCtx should report true after a completed wait")
 	}
+}
+
+// The UI adapter is what turns a view toggle into something remembered for the
+// host, so it is worth pinning down separately from the manager.
+func TestUIControllerPersistsTheView(t *testing.T) {
+	dir := t.TempDir()
+	settings := config.Open(filepath.Join(dir, config.FileName))
+
+	mgr := tunnel.New(tunnel.NewAllocator("127.0.0.1", false), nil, tunnel.Options{
+		Policy: tunnel.DefaultPolicy(),
+	})
+	defer mgr.Close()
+
+	c := &uiController{Manager: mgr, settings: settings, host: "devbox"}
+
+	p := c.Policy()
+	p.Existing = true
+	c.SetPolicy(p)
+	if got := settings.View("devbox"); got != config.ViewEverything {
+		t.Errorf("view = %q, want everything", got)
+	}
+	if !c.Policy().Existing {
+		t.Error("the policy change did not reach the manager")
+	}
+
+	p.Existing = false
+	c.SetPolicy(p)
+	if got := settings.View("devbox"); got != config.ViewSinceStart {
+		t.Errorf("view = %q, want since-start", got)
+	}
+}
+
+// A remembered view is applied at startup unless --existing was passed.
+func TestRememberedViewAppliesAtStartup(t *testing.T) {
+	isolatedEnv(t)
+
+	path, err := config.DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := newFakeRemote(t)
+	remote.echo = startEcho(t)
+	port := freeLocalPort(t)
+	// Present in the first scan, so only the "everything" view forwards it.
+	remote.transcript = "@@AUTOTUN-READY 1 ss Linux\n@@AUTOTUN-SCAN\n" +
+		fmt.Sprintf("LISTEN 0 511 127.0.0.1:%d 0.0.0.0:*\n", port) +
+		"@@AUTOTUN-END\n"
+
+	host, _, _ := net.SplitHostPort(remote.addr())
+	body := fmt.Sprintf("hosts:\n  %s:\n    view: everything\n", host)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _ := runApp(t, baseConfig(remote))
+	waitForOutput(t, out, "opened")
 }

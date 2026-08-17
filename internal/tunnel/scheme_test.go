@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/probe"
 )
 
@@ -154,54 +156,47 @@ func TestDetectSchemeHandlesADeadPort(t *testing.T) {
 	}
 }
 
-// memoryStore is an in-memory SchemeMemory.
+// memoryStore is an in-memory Settings implementation.
 type memoryStore struct {
 	mu     sync.Mutex
-	values map[string]string
+	values map[string]config.Port
 }
 
-func newMemoryStore() *memoryStore { return &memoryStore{values: map[string]string{}} }
+func newMemoryStore() *memoryStore { return &memoryStore{values: map[string]config.Port{}} }
 
 func (m *memoryStore) key(host string, port int) string {
-	return host + ":" + itoa(port)
+	return fmt.Sprintf("%s:%d", host, port)
 }
 
-func (m *memoryStore) Get(host string, port int) (string, bool) {
+func (m *memoryStore) Port(host string, port int) config.Port {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v, ok := m.values[m.key(host, port)]
-	return v, ok
+	return m.values[m.key(host, port)]
 }
 
-func (m *memoryStore) Set(host string, port int, value string) {
+func (m *memoryStore) SetPort(host string, port int, p config.Port) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if value == "" {
+	if p.IsZero() {
 		delete(m.values, m.key(host, port))
 		return
 	}
-	m.values[m.key(host, port)] = value
+	m.values[m.key(host, port)] = p
 }
 
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
+// scheme returns the remembered scheme for a port, if any.
+func (m *memoryStore) scheme(host string, port int) (string, bool) {
+	p := m.Port(host, port)
+	return p.Scheme, p.Scheme != ""
 }
 
 func TestManagerCycleSchemeIsRemembered(t *testing.T) {
 	echo := newEchoServer(t)
 	memory := newMemoryStore()
 	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: echo.addr()}, Options{
-		Policy:  DefaultPolicy(),
-		Host:    "devbox",
-		Schemes: memory,
+		Policy:   DefaultPolicy(),
+		Host:     "devbox",
+		Settings: memory,
 	})
 	defer m.Close()
 
@@ -212,7 +207,7 @@ func TestManagerCycleSchemeIsRemembered(t *testing.T) {
 	if got := m.CycleScheme(port); got != SchemeHTTP {
 		t.Fatalf("first cycle = %q, want http", got)
 	}
-	if got, ok := memory.Get("devbox", port); !ok || got != "http" {
+	if got, ok := memory.scheme("devbox", port); !ok || got != "http" {
 		t.Errorf("the choice was not persisted: %q, %v", got, ok)
 	}
 	if st := stateFor(t, m, port); st.Scheme != SchemeHTTP || !st.SchemePinned {
@@ -233,7 +228,7 @@ func TestManagerCycleSchemeIsRemembered(t *testing.T) {
 	if got := m.CycleScheme(port); got != SchemeUnknown {
 		t.Fatalf("third cycle = %q, want unknown", got)
 	}
-	if _, ok := memory.Get("devbox", port); ok {
+	if _, ok := memory.scheme("devbox", port); ok {
 		t.Error("cycling back to unknown should forget the entry")
 	}
 	if st := stateFor(t, m, port); st.SchemePinned {
@@ -245,12 +240,12 @@ func TestManagerRestoresRememberedScheme(t *testing.T) {
 	echo := newEchoServer(t)
 	memory := newMemoryStore()
 	port := freePort(t)
-	memory.Set("devbox", port, "https")
+	memory.SetPort("devbox", port, config.Port{Scheme: "https"})
 
 	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: echo.addr()}, Options{
-		Policy:  DefaultPolicy(),
-		Host:    "devbox",
-		Schemes: memory,
+		Policy:   DefaultPolicy(),
+		Host:     "devbox",
+		Settings: memory,
 	})
 	defer m.Close()
 
@@ -269,13 +264,13 @@ func TestManagerRestoresRememberedScheme(t *testing.T) {
 func TestManagerDetectionDoesNotOverridePinnedSchemes(t *testing.T) {
 	memory := newMemoryStore()
 	port := freePort(t)
-	memory.Set("devbox", port, "http")
+	memory.SetPort("devbox", port, config.Port{Scheme: "http"})
 
 	// The dialer points at a real TLS server, so detection would say https.
 	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: tlsServer(t)}, Options{
 		Policy:        DefaultPolicy(),
 		Host:          "devbox",
-		Schemes:       memory,
+		Settings:      memory,
 		DetectSchemes: true,
 	})
 	defer m.Close()

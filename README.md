@@ -45,15 +45,15 @@ to the *same port number* on your machine. Service appears, tunnel appears. Serv
 tunnel dies. You go back to writing code, which is the thing you were ostensibly doing.
 
 ```
- autotun ▸ devbox                       ● connected (ss) · 3 tunnels · 1 idle · 00:14:22
-
-    LOCAL     ↓REMOTE  VIA      PROCESS                   AGE   CONNS        IN       OUT
-●    3000  ←     3000  http     node vite                 14m       2    1.2 MB    340 KB
-◦    5173  ≠     5173  https    node vite --host           9m       0       0 B       0 B
-     8080  ←     8080  unknown  python3 -m http.server     4m       1     18 KB     92 KB
-        —        5432  unknown  postgres                                   pre-existing
-
- ↑↓ move · esc quit · ? help · enter detail · o open · t http/s · / filter · a attach
+╭─ autotun ▸ devbox ────────── ● connected (ss) · 3 tunnels · 1 idle · 00:14:22 ─╮
+│    LOCAL     ↓REMOTE  M  VIA      PROCESS               AGE   CONNS       IN  │
+├───────────────────────────────────────────────────────────────────────────────┤
+│●    3000  ←     3000     http     node vite             14m       2   1.2 MB  │
+│◦    5173  ≠     5173  +  https    node vite --host       9m       0      0 B  │
+│     8080  ←     8080     unknown  python3 -m http.se…    4m       1    18 KB  │
+│        —        5432  -  unknown  postgres                          never fwd │
+│                                                                               │
+╰─ ↑↓ move · esc quit · ? help · enter detail · o open · a auto/on/off ─────────╯
 ```
 
 `●` means traffic is flowing through it *right now*. `◦` means it just showed up. When you
@@ -147,16 +147,17 @@ someone else's stderr and hoping.
 
 | | |
 |---|---|
-| `↑↓` / `j k`, `g` / `G`, `pgup` / `pgdn` | move around |
+| `↑↓` / `j k`, `g` / `G`, `pgup` / `pgdn` | move around — nothing is highlighted until you do |
 | `enter`, `d` | detail pane |
 | `o`, `space` | open in a browser |
-| `t` | set http / https — **remembered per host and port** |
+| `a` | auto → always on → never — **remembered** |
+| `t` | set http / https — **remembered** |
+| `l` | pin the local port — **remembered** |
 | `y` | copy the URL |
-| `a` | attach / detach this port |
-| `e` | toggle pre-existing ports |
+| `e` | view: since start / everything — **remembered per host** |
 | `p` | pause automatic forwarding |
 | `s` / `r` | cycle sort / reverse |
-| `/` | filter by port or process |
+| `/` | search by port or process |
 | `esc`, `q` | quit — it asks first, then dissolves the screen in green rain |
 | `ctrl+c` | quit *right now*, no theatrics |
 
@@ -166,6 +167,7 @@ And the whole thing is clickable, because it's 2026 and you have a mouse:
 |---|---|
 | click a row | select it |
 | double-click a row | open it in a browser |
+| click the `M` cell | cycle auto → on → off |
 | click the `VIA` cell | cycle unknown → http → https |
 | click a column header | sort by it; click again to reverse |
 | click anything in the key bar | run that action — every feature is discoverable without memorizing a key |

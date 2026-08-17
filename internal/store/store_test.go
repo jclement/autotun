@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -145,6 +146,9 @@ func TestStoreWritesStableJSON(t *testing.T) {
 }
 
 func TestStoreFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not carry Unix permission bits")
+	}
 	path := filepath.Join(t.TempDir(), "schemes.json")
 	s := Open(path)
 	s.Set("devbox", 3000, "http")

@@ -1,0 +1,86 @@
+[tools]
+go = "1.26"
+goreleaser = "latest"
+golangci-lint = "latest"
+
+[env]
+# Every artifact is static and cross-compilable; nothing here needs libc.
+CGO_ENABLED = "0"
+
+[tasks.build]
+description = "Build the autotun binary into ./bin"
+run = "go build -o bin/autotun ."
+
+[tasks.install]
+description = "Install autotun into your GOBIN"
+run = "go install ."
+
+[tasks.test]
+description = "Run the unit and integration tests"
+run = "go test -race ./..."
+
+[tasks.cover]
+description = "Run tests and open the coverage report"
+run = """
+go test -race -covermode=atomic -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out | tail -1
+go tool cover -html=coverage.out
+"""
+
+[tasks.e2e]
+description = "Run the Docker-backed end-to-end suite (needs docker)"
+run = "go test -tags e2e -count=1 -timeout 20m ./e2e/..."
+
+[tasks.lint]
+description = "Vet and lint"
+run = ["go vet ./...", "golangci-lint run"]
+
+[tasks.fmt]
+description = "Format all Go source"
+run = "gofmt -w ."
+
+[tasks.check]
+description = "Everything CI runs: format check, vet, lint, tests"
+depends = ["lint", "test"]
+run = """
+if [ -n "$(gofmt -l . | grep -v '^bin/')" ]; then
+	echo "these files need gofmt:"
+	gofmt -l . | grep -v '^bin/'
+	exit 1
+fi
+"""
+
+[tasks.snapshot]
+description = "Build release artifacts locally without publishing"
+run = "goreleaser release --snapshot --clean"
+
+# ---------------------------------------------------------------------------
+# Development loop
+# ---------------------------------------------------------------------------
+
+[tasks.dev]
+description = "Build and run against a host, or against a throwaway Docker dev box"
+usage = '''
+arg "[host]" help="SSH destination to tunnel. Omit to boot a local Docker dev box."
+'''
+run = "./scripts/dev.sh"
+
+[tasks."dev:sandbox"]
+description = "Start the Docker dev box on its own and print how to reach it"
+run = "./scripts/sandbox.sh start"
+
+[tasks."dev:stop"]
+description = "Tear down the Docker dev box"
+run = "./scripts/sandbox.sh stop"
+
+[tasks."dev:shell"]
+description = "Open a shell on the Docker dev box"
+run = "./scripts/sandbox.sh shell"
+
+# ---------------------------------------------------------------------------
+# Release
+# ---------------------------------------------------------------------------
+
+[tasks.release]
+description = "Bump the version, tag, and push — which triggers the release workflow"
+run = "./scripts/release.sh"

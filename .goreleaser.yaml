@@ -1,0 +1,121 @@
+version: 2
+
+project_name: autotun
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: autotun
+    main: .
+    binary: autotun
+    env:
+      # Static binaries so a single artifact runs anywhere on the platform.
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - "386"
+    ignore:
+      # Neither platform ships a 32-bit build worth maintaining.
+      - goos: darwin
+        goarch: "386"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/jclement/autotun/internal/buildinfo.version={{.Version}}
+      - -X github.com/jclement/autotun/internal/buildinfo.commit={{.FullCommit}}
+      - -X github.com/jclement/autotun/internal/buildinfo.date={{.Date}}
+
+archives:
+  - id: autotun
+    # Plain GOOS_GOARCH naming: `autotun update` locates its own asset by that
+    # suffix, and so does every curl-based install snippet anyone writes.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
+
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 99
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+# Homebrew now distributes prebuilt binaries as casks; the older `brews`
+# (formula) block is deprecated.
+homebrew_casks:
+  - name: autotun
+    binaries: [autotun]
+    repository:
+      owner: jclement
+      name: homebrew-tap
+      token: '{{ index .Env "HOMEBREW_TAP_TOKEN" }}'
+    # Pushing to another repository needs a PAT that the default GITHUB_TOKEN
+    # cannot provide. Without one the release still publishes its binaries and
+    # only the tap update is skipped, rather than failing the whole run.
+    skip_upload: '{{ if index .Env "HOMEBREW_TAP_TOKEN" }}false{{ else }}true{{ end }}'
+    directory: Casks
+    homepage: https://github.com/jclement/autotun
+    description: Forward every port your remote dev box opens, automatically
+    license: MIT
+    commit_author:
+      name: goreleaser
+      email: noreply@github.com
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            # Strip the quarantine flag so a downloaded binary runs without a
+            # Gatekeeper prompt.
+            system_command "/usr/bin/xattr",
+                           args: ["-dr", "com.apple.quarantine", "#{staged_path}/autotun"],
+                           must_succeed: false
+          end
+
+release:
+  github:
+    owner: jclement
+    name: autotun
+  draft: false
+  prerelease: auto
+  footer: |
+    ---
+
+    ## Install
+
+    ```sh
+    brew install jclement/tap/autotun
+    ```
+
+    Or grab a binary above — they are static, so there is nothing else to install.

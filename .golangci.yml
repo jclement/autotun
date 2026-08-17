@@ -1,0 +1,39 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - govet
+    - ineffassign
+    - misspell
+    - staticcheck
+    - unconvert
+    - unused
+  settings:
+    misspell:
+      locale: US
+    errcheck:
+      # Writing to an already-doomed terminal and closing on a cleanup path
+      # have no recovery worth writing; checking them adds noise, not safety.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*os.File).Close
+        - (net.Conn).Close
+        - (io.Closer).Close
+        - (*golang.org/x/crypto/ssh.Session).Close
+        - (*golang.org/x/crypto/ssh.Client).Close
+        - (*github.com/jclement/autotun/internal/sshx.Client).Close
+  exclusions:
+    rules:
+      # Tests deliberately ignore errors from cleanup and best-effort helpers.
+      - path: (_test\.go|^e2e/)
+        linters:
+          - errcheck
+          - bodyclose
+
+formatters:
+  enable:
+    - gofmt

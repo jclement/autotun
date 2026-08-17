@@ -6,7 +6,8 @@
 # ~/.ssh/*.pub — so connecting to it works exactly like connecting to a real
 # host, with no sandbox-specific key to manage.
 #
-#   scripts/sandbox.sh start   build and boot it, print connection details
+#   scripts/sandbox.sh start   build and boot it (reuses a running one)
+#   scripts/sandbox.sh restart always recreate, so its delayed services are new
 #   scripts/sandbox.sh stop    tear it down
 #   scripts/sandbox.sh shell   open a shell inside it
 #   scripts/sandbox.sh port    print the published SSH port
@@ -52,6 +53,19 @@ cmd_start() {
 		echo "dev box already running on port $(ssh_port)"
 		return
 	fi
+	boot
+}
+
+# restart always recreates the container. Its dev servers start on a delay, so
+# a fresh one is what lets you watch tunnels appear rather than finding
+# everything already listening and therefore skipped as pre-existing.
+cmd_restart() {
+	need_docker
+	docker rm -f "$NAME" >/dev/null 2>&1 || true
+	boot
+}
+
+boot() {
 
 	local keys
 	keys="$(authorized_keys)"
@@ -114,8 +128,9 @@ cmd_shell() {
 
 case "${1:-start}" in
 start) cmd_start ;;
+restart) cmd_restart ;;
 stop) cmd_stop ;;
 shell) cmd_shell ;;
 port) ssh_port ;;
-*) die "unknown command ${1}; try start, stop, shell or port" ;;
+*) die "unknown command ${1}; try start, restart, stop, shell or port" ;;
 esac

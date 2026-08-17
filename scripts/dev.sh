@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The development loop: build autotun, install it as `autotun-dev`, and run it.
+# The development loop: build autotun and install it as `autotun-dev`.
 #
-#   mise run dev              boot a throwaway Docker dev box and tunnel it
-#   mise run dev -- devbox    tunnel a real host
+#   mise run dev              build, then start the throwaway Docker dev box
+#   mise run dev -- devbox    build, then tunnel a real host
 #   mise run dev -- devbox --existing --plain
 #
 # Everything after the host is passed straight through to autotun.
@@ -30,14 +30,16 @@ cp -f bin/autotun "$DEV_BIN"
 echo "› installed $DEV_BIN"
 
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
-	# A host was given: tunnel it directly.
+	# A host was given: tunnel it.
 	echo "› autotun-dev $*"
 	exec "$DEV_BIN" "$@"
 fi
 
-# No host: boot the local dev box and point at that. It authorizes the keys we
-# already have, so this uses the agent exactly like a real host would.
-"$ROOT/scripts/sandbox.sh" start
+# No host: just bring up the dev server and hand back the command to tunnel it.
+# It is restarted rather than reused, so its delayed services appear *after*
+# you connect — reusing a long-running container makes everything look
+# pre-existing, which is exactly the case autotun is designed to ignore.
+"$ROOT/scripts/sandbox.sh" restart
 
 PORT="$("$ROOT/scripts/sandbox.sh" port)"
 if [ -z "$PORT" ]; then
@@ -45,14 +47,8 @@ if [ -z "$PORT" ]; then
 	exit 1
 fi
 
-echo "› autotun-dev -> 127.0.0.1:$PORT (dev box)"
-echo
+cat <<-EOF
 
-# The container is rebuilt constantly, so its host key changes every run.
-exec "$DEV_BIN" \
-	--insecure-host-key \
-	-p "$PORT" \
-	-l dev \
-	--interval 1s \
-	"$@" \
-	127.0.0.1
+	tunnel it with:
+	  $DEV_BIN --insecure-host-key -p $PORT -l dev 127.0.0.1
+EOF

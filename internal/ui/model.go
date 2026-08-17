@@ -106,6 +106,9 @@ type Model struct {
 
 	lastClickPort int
 	lastClickAt   time.Time
+	// footerZones maps clickable spans of the key bar, recorded as it renders
+	// so a click always hits what is actually on screen.
+	footerZones []zone
 
 	dissolving *dissolve
 	// pendingOSC is an escape sequence emitted with the next frame. Writing
@@ -216,25 +219,81 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // doubleClickWindow is how close two clicks must be to count as a double click.
 const doubleClickWindow = 450 * time.Millisecond
 
-// handleMouse maps clicks onto rows: one click selects, a double click opens
-// the tunnel in a browser, and the wheel scrolls.
+// Row indices of the fixed chrome, used for mouse hit-testing.
+const (
+	headerRow = 0 // title line
+	columnRow = 2 // column titles
+)
+
+// handleMouse routes clicks over the whole interface: the column headers sort,
+// the key bar runs its action, a row selects, the VIA cell cycles the
+// protocol, a double click opens, and an open overlay swallows the click.
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
-	if m.dissolving != nil || m.confirming || m.filtering {
+	if m.dissolving != nil {
 		return nil
 	}
 
+	// Wheel scrolls the table regardless of where the pointer is.
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
+		if m.overlayOpen() {
+			return nil
+		}
 		m.cursor--
 		m.clampCursor()
 		return nil
 	case tea.MouseButtonWheelDown:
+		if m.overlayOpen() {
+			return nil
+		}
 		m.cursor++
 		m.clampCursor()
 		return nil
 	}
 
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return nil
+	}
+
+	// A click anywhere dismisses a detail or help overlay, the way clicking
+	// outside a popover does everywhere else.
+	if m.showDetail || m.showHelp {
+		m.showDetail, m.showHelp = false, false
+		return nil
+	}
+	// The quit confirmation is deliberately modal: it must be answered.
+	if m.confirming {
+		return nil
+	}
+	// While filtering, a click outside the editor commits the filter rather
+	// than silently editing something else.
+	if m.filtering {
+		m.filtering = false
+		return nil
+	}
+
+	// The key bar is clickable, which makes every action discoverable without
+	// knowing a single shortcut.
+	if m.isFooterRow(msg.Y) {
+		for _, z := range m.footerZones {
+			if z.contains(msg.X) {
+				return m.runAction(z.id)
+			}
+		}
+		return nil
+	}
+
+	// Clicking a column header sorts by it, and clicking it again reverses.
+	if msg.Y == columnRow {
+		if c, ok := m.columnAt(msg.X); ok && c.sortable {
+			if m.sortKey == c.sort {
+				m.reverse = !m.reverse
+			} else {
+				m.sortKey, m.reverse = c.sort, false
+			}
+			m.reload()
+			return m.showToast(ToastMsg{Text: "sort: " + m.sortKey.String()})
+		}
 		return nil
 	}
 
@@ -245,6 +304,13 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	m.cursor = idx
 	m.clampCursor()
 
+	// The VIA cell is a control, not just a readout: clicking it cycles the
+	// protocol, which is the one per-row setting worth changing by hand.
+	if c, ok := m.columnAt(msg.X); ok && c.scheme {
+		m.lastClickPort = 0
+		return m.cycleScheme()
+	}
+
 	now := m.now()
 	port := m.selectedPort()
 	isDouble := port == m.lastClickPort && now.Sub(m.lastClickAt) < doubleClickWindow
@@ -254,10 +320,51 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 	m.lastClickPort = 0 // a third click starts a new pair
-	if st, ok := m.selected(); ok && st.Scheme == tunnel.SchemeUnknown {
-		return m.showToast(ToastMsg{Text: "unknown protocol — press t to set http/https", Bad: true})
-	}
 	return m.openSelected()
+}
+
+// overlayOpen reports whether a modal layer is covering the table.
+func (m *Model) overlayOpen() bool {
+	return m.confirming || m.showHelp || m.showDetail || m.filtering
+}
+
+// isFooterRow reports whether y is the key bar.
+func (m *Model) isFooterRow(y int) bool {
+	return y == m.height-1
+}
+
+// runAction performs the action a key bar entry names, so mouse and keyboard
+// share one implementation.
+func (m *Model) runAction(id string) tea.Cmd {
+	switch id {
+	case "↑↓":
+		return nil
+	case "esc":
+		m.confirming = true
+		return nil
+	case "enter":
+		if _, ok := m.selected(); ok {
+			m.showDetail = !m.showDetail
+		}
+	case "o":
+		return m.openSelected()
+	case "t":
+		return m.cycleScheme()
+	case "/":
+		m.filtering = true
+		m.filter.SetValue(m.query)
+	case "a":
+		return m.toggleSelected()
+	case "y":
+		return m.copySelected()
+	case "s":
+		m.sortKey = m.sortKey.Next()
+		m.reload()
+		return m.showToast(ToastMsg{Text: "sort: " + m.sortKey.String()})
+	case "?":
+		m.showHelp = !m.showHelp
+	}
+	return nil
 }
 
 // rowAt maps a terminal row to a table index, or -1 if it is not a data row.
@@ -454,14 +561,9 @@ func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
 		return m.toggleSelected()
 	case "t":
 		return m.cycleScheme()
-	case " ":
-		// Space opens only when we know the row speaks HTTP(S), so it is safe
-		// to lean on without checking what a port is first.
-		if st, ok := m.selected(); ok && st.Scheme == tunnel.SchemeUnknown {
-			return m.showToast(ToastMsg{Text: "unknown protocol — press t to set http/https", Bad: true})
-		}
-		return m.openSelected()
-	case "o":
+	case " ", "o":
+		// The VIA column shows which scheme will be used, including when it is
+		// still an unconfirmed "http?", so opening never needs to refuse.
 		return m.openSelected()
 	case "y":
 		return m.copySelected()

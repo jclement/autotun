@@ -45,15 +45,15 @@ to the *same port number* on your machine. Service appears, tunnel appears. Serv
 tunnel dies. You go back to writing code, which is the thing you were ostensibly doing.
 
 ```
- autotun ▸ devbox                        ● connected (ss) · 3 tunnels · 1 idle · 00:14:22
+ autotun ▸ devbox                       ● connected (ss) · 3 tunnels · 1 idle · 00:14:22
 
-   LOCAL   REMOTE  VIA    PROCESS                        AGE  CONNS        IN       OUT
- ● 3000  ←   3000  http   node vite                      14m      2    1.2 MB    340 kB
- ◦ 5173  ≠   5173  https  node vite --host                9m      0       0 B       0 B
-   8080  ←   8080  —      python3 -m http.server          4m      1     18 kB     92 kB
-   5432      5432         postgres                                      pre-existing
+    LOCAL     ↓REMOTE  VIA    PROCESS                     AGE   CONNS        IN       OUT
+●    3000  ←     3000  http   node vite                   14m       2    1.2 MB    340 KB
+◦    5173  ≠     5173  https  node vite --host             9m       0       0 B       0 B
+     8080  ←     8080  http?  python3 -m http.server       4m       1     18 KB     92 KB
+        —        5432  http?  postgres                                     pre-existing
 
- ↑↓ move · esc quit · enter detail · o open · t http/s · / filter · a attach · y copy
+ ↑↓ move · esc quit · ? help · enter detail · o open · t http/s · / filter · a attach
 ```
 
 `●` means traffic is flowing through it *right now*. `◦` means it just showed up. When you
@@ -130,8 +130,9 @@ loop keeps working. You possibly don't even notice, which is the goal.
 **It doesn't poke your services.** autotun figures out which ports speak HTTPS by offering a
 TLS handshake — that's it. It will never fire a speculative `GET /` at an unidentified port,
 because "what happens if you send HTTP to the production-shaped database on 5432" is a
-question best left unanswered. Anything it can't identify stays `—` until you press `t`, and
-it remembers your answer for that host and port forever after.
+question best left unanswered. Anything it can't identify shows as `http?` — meaning "opening
+this will try HTTP, and nobody has confirmed that" — until you press `t` or click the cell,
+after which it remembers your answer for that host and port forever.
 
 **It's a real SSH client, not a wrapper.** `golang.org/x/crypto/ssh`, one `direct-tcpip`
 channel per connection. It never shells out to `ssh -L`. That's what makes the live byte
@@ -144,8 +145,7 @@ someone else's stderr and hoping.
 |---|---|
 | `↑↓` / `j k`, `g` / `G`, `pgup` / `pgdn` | move around |
 | `enter`, `d` | detail pane |
-| `o` | open in a browser |
-| `space`, double-click | open, but only if the protocol is known |
+| `o`, `space` | open in a browser |
 | `t` | set http / https — **remembered per host and port** |
 | `y` | copy the URL |
 | `a` | attach / detach this port |
@@ -155,6 +155,17 @@ someone else's stderr and hoping.
 | `/` | filter by port or process |
 | `esc`, `q` | quit — it asks first, then dissolves the screen in green rain |
 | `ctrl+c` | quit *right now*, no theatrics |
+
+And the whole thing is clickable, because it's 2026 and you have a mouse:
+
+| | |
+|---|---|
+| click a row | select it |
+| double-click a row | open it in a browser |
+| click the `VIA` cell | cycle unknown → http → https |
+| click a column header | sort by it; click again to reverse |
+| click anything in the key bar | run that action — every feature is discoverable without memorizing a key |
+| wheel | scroll |
 
 `y` copies via OSC 52, which means the URL lands in your *actual* clipboard even through
 nested SSH and tmux, rather than the clipboard of a machine three hops away that nobody can

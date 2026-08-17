@@ -12,13 +12,15 @@ import (
 
 // Column widths. PROCESS absorbs whatever is left over.
 const (
-	wMark   = 1
-	wLocal  = 6
+	wMark = 1
+	// The port columns carry a sort indicator on top of their title, so they
+	// are one cell wider than "REMOTE" needs on its own.
+	wLocal  = 7
 	wArrow  = 1
-	wRemote = 6
+	wRemote = 7
 	wScheme = 5
 	wAge    = 5
-	wConns  = 5
+	wConns  = 6
 	wBytes  = 8
 	gap     = 2
 	minProc = 12
@@ -166,9 +168,14 @@ func (m *Model) statusChip() string {
 	}
 }
 
+// tailWidth is the combined width of the AGE, CONNS, IN and OUT columns, which
+// is the region a skipped row's reason occupies instead.
+func tailWidth() int {
+	return wAge + gap + wConns + gap + wBytes + gap + wBytes
+}
+
 func (m *Model) procWidth() int {
-	used := wMark + 1 + wLocal + gap + wArrow + gap + wRemote + gap + wScheme + gap +
-		wAge + gap + wConns + gap + wBytes + gap + wBytes
+	used := wMark + 1 + wLocal + gap + wArrow + gap + wRemote + gap + wScheme + gap + tailWidth()
 	w := m.width - used - gap - 1
 	if w < minProc {
 		return minProc
@@ -176,20 +183,80 @@ func (m *Model) procWidth() int {
 	return w
 }
 
-func (m *Model) columnHeader() string {
-	cols := []string{
-		padLeft("LOCAL", wLocal),
-		strings.Repeat(" ", wArrow),
-		padLeft("REMOTE", wRemote),
-		pad("VIA", wScheme),
-		pad("PROCESS", m.procWidth()),
-		padLeft("AGE", wAge),
-		padLeft("CONNS", wConns),
-		padLeft("IN", wBytes),
-		padLeft("OUT", wBytes),
+// column is one table column's position and meaning. The renderer and the
+// mouse hit-testing both read this, so a click always lands on the column the
+// user actually sees.
+type column struct {
+	title string
+	x     int // first cell
+	w     int
+	right bool    // right-aligned
+	sort  SortKey // what clicking the header sorts by
+	// sortable is false for columns with no meaningful ordering.
+	sortable bool
+	scheme   bool // clicking a cell in this column cycles the protocol
+}
+
+// columns computes the table layout for the current width.
+func (m *Model) columns() []column {
+	x := wMark + 1
+	next := func(title string, w int, right bool, key SortKey, sortable bool) column {
+		c := column{title: title, x: x, w: w, right: right, sort: key, sortable: sortable}
+		x += w + gap
+		return c
 	}
-	prefix := strings.Repeat(" ", wMark+1)
-	return clampWidth(prefix+strings.Join(cols, strings.Repeat(" ", gap)), m.width)
+	cols := []column{
+		next("LOCAL", wLocal, true, SortLocal, true),
+		next("", wArrow, false, SortRemote, false),
+		next("REMOTE", wRemote, true, SortRemote, true),
+		next("VIA", wScheme, false, SortRemote, false),
+		next("PROCESS", m.procWidth(), false, SortProcess, true),
+		next("AGE", wAge, true, SortAge, true),
+		next("CONNS", wConns, true, SortConns, true),
+		next("IN", wBytes, true, SortTraffic, true),
+		next("OUT", wBytes, true, SortTraffic, true),
+	}
+	cols[3].scheme = true
+	return cols
+}
+
+// columnAt returns the column under a terminal x position.
+func (m *Model) columnAt(x int) (column, bool) {
+	for _, c := range m.columns() {
+		if x >= c.x && x < c.x+c.w {
+			return c, true
+		}
+	}
+	return column{}, false
+}
+
+func (m *Model) columnHeader() string {
+	var b strings.Builder
+	b.WriteString(strings.Repeat(" ", wMark+1))
+	for i, c := range m.columns() {
+		if i > 0 {
+			b.WriteString(strings.Repeat(" ", gap))
+		}
+		title := c.title
+		// Mark the active sort so the header explains the current ordering.
+		if c.sortable && c.sort == m.sortKey {
+			arrow := "↓"
+			if m.reverse {
+				arrow = "↑"
+			}
+			if c.right {
+				title = arrow + title
+			} else {
+				title += arrow
+			}
+		}
+		if c.right {
+			b.WriteString(padLeft(title, c.w))
+		} else {
+			b.WriteString(pad(title, c.w))
+		}
+	}
+	return clampWidth(b.String(), m.width)
 }
 
 func (m *Model) tableView() string {
@@ -288,7 +355,9 @@ func (m *Model) rowView(s tunnel.State, selected bool) string {
 func (m *Model) rowText(s tunnel.State, act activity, local, arrow, remote, cmd string, now time.Time) string {
 	prefix := m.marker(act) + " "
 
-	// Non-forwarding rows say why, in place of the scheme and traffic columns.
+	// Non-forwarding rows say why, in place of the traffic columns. The reason
+	// is right-aligned to the end of the row so it lines up into a column of
+	// its own rather than drifting into the middle of a wide terminal.
 	if s.Status != tunnel.StatusActive {
 		reason := string(s.Skip)
 		if s.Status == tunnel.StatusError {
@@ -297,10 +366,21 @@ func (m *Model) rowText(s tunnel.State, act activity, local, arrow, remote, cmd 
 		if s.Manual && reason == "" {
 			reason = "detached"
 		}
+
+		procW, tailW := m.procWidth(), tailWidth()
+		// A long reason borrows width from the process column rather than
+		// being truncated, since the reason is the point of the row.
+		if over := ansi.StringWidth(reason) - tailW; over > 0 {
+			if borrow := min(over, procW-minProc); borrow > 0 {
+				procW -= borrow
+				tailW += borrow
+			}
+		}
+
 		return prefix + padLeft(local, wLocal) + strings.Repeat(" ", gap) + arrow +
 			strings.Repeat(" ", gap) + padLeft(remote, wRemote) + strings.Repeat(" ", gap) +
-			pad("", wScheme) + strings.Repeat(" ", gap) +
-			pad(cmd, m.procWidth()) + strings.Repeat(" ", gap) + reason
+			pad(s.Scheme.Label(), wScheme) + strings.Repeat(" ", gap) +
+			pad(cmd, procW) + strings.Repeat(" ", gap) + padLeft(reason, tailW)
 	}
 
 	conns := itoa(s.ActiveConns)
@@ -349,9 +429,9 @@ func (m *Model) footerView() string {
 	// from the end, a whole hint at a time. Truncating mid-word would leave
 	// something like "esc q", which reads as a different key.
 	keys := [][2]string{
-		{"↑↓", "move"}, {"esc", "quit"}, {"enter", "detail"}, {"o", "open"},
-		{"t", "http/s"}, {"/", "filter"}, {"a", "attach"}, {"y", "copy"},
-		{"s", "sort"}, {"?", "help"},
+		{"↑↓", "move"}, {"esc", "quit"}, {"?", "help"}, {"enter", "detail"},
+		{"o", "open"}, {"t", "http/s"}, {"/", "filter"}, {"a", "attach"},
+		{"y", "copy"}, {"s", "sort"},
 	}
 
 	var flags []string
@@ -374,24 +454,41 @@ func (m *Model) footerView() string {
 	sep := t.Faintest.Render(" · ")
 	var bar strings.Builder
 	used := 0
+	m.footerZones = m.footerZones[:0]
 	for i, k := range keys {
 		hint := t.Key.Render(k[0]) + " " + t.KeyDesc.Render(k[1])
 		width := ansi.StringWidth(k[0]) + 1 + ansi.StringWidth(k[1])
+		lead := 0
 		if i > 0 {
-			width += 3 // " · "
+			lead = 3 // " · "
 		}
-		if used+width > budget {
+		if used+lead+width > budget {
 			break
 		}
 		if i > 0 {
 			bar.WriteString(sep)
 		}
 		bar.WriteString(hint)
-		used += width
+		// The leading space in the rendered bar shifts everything by one.
+		m.footerZones = append(m.footerZones, zone{
+			x0: 1 + used + lead,
+			x1: 1 + used + lead + width,
+			id: k[0],
+		})
+		used += lead + width
 	}
 
 	return "\n" + fitLine(" "+bar.String(), right, m.width)
 }
+
+// zone is a clickable span on a single line.
+type zone struct {
+	x0, x1 int // half-open range of terminal columns
+	id     string
+}
+
+// contains reports whether x falls inside the zone.
+func (z zone) contains(x int) bool { return x >= z.x0 && x < z.x1 }
 
 // fitLine puts left and right on one line of the given width, dropping the
 // right-hand side when there is no room for it.
@@ -486,13 +583,20 @@ func (m *Model) helpBox() string {
 		}},
 		{"act", [][2]string{
 			{"enter, d", "detail"},
-			{"o", "open in browser"},
+			{"o, space", "open in browser"},
 			{"t", "set http / https (remembered)"},
-			{"space, 2×click", "open, if http or https"},
 			{"y", "copy URL to clipboard"},
 			{"a", "attach / detach this port"},
 			{"e", "toggle pre-existing ports"},
 			{"p", "pause automatic forwarding"},
+		}},
+		{"mouse", [][2]string{
+			{"click", "select a row"},
+			{"double click", "open in browser"},
+			{"click VIA", "cycle http / https"},
+			{"click header", "sort by that column"},
+			{"click keybar", "run that action"},
+			{"wheel", "scroll"},
 		}},
 		{"leave", [][2]string{
 			{"esc, q", "quit (asks first)"},

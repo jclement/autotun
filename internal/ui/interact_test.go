@@ -186,8 +186,9 @@ func TestModelSchemeChangesTheOpenedURL(t *testing.T) {
 	}
 }
 
-// Space is the safe opener: it refuses to guess when the protocol is unknown.
-func TestModelSpaceRequiresAKnownScheme(t *testing.T) {
+// An unconfirmed scheme is shown as "http?" rather than refusing to open, so
+// space and o behave identically and never make you press another key first.
+func TestModelSpaceOpensWithTheAssumedScheme(t *testing.T) {
 	var opened []string
 	stub := newStub(row(3000, 3000, "node"))
 	m := New(stub, Options{
@@ -198,16 +199,14 @@ func TestModelSpaceRequiresAKnownScheme(t *testing.T) {
 	m.reload()
 
 	send(m, " ")
-	if len(opened) != 0 {
-		t.Errorf("space opened %v despite an unknown protocol", opened)
-	}
-	if !m.toast.Bad || !strings.Contains(m.toast.Text, "press t") {
-		t.Errorf("toast = %q, should point at the t key", m.toast.Text)
+	if len(opened) != 1 || opened[0] != "http://127.0.0.1:3000" {
+		t.Errorf("opened = %v, want http assumed for an unknown scheme", opened)
 	}
 
-	send(m, "t", " ")
-	if len(opened) != 1 || opened[0] != "http://127.0.0.1:3000" {
-		t.Errorf("opened = %v, want the http URL once the scheme is set", opened)
+	// And once https is pinned, that is what opens.
+	send(m, "t", "t", " ")
+	if len(opened) != 2 || opened[1] != "https://127.0.0.1:3000" {
+		t.Errorf("opened = %v, want the https URL after pinning", opened)
 	}
 }
 
@@ -332,5 +331,193 @@ func TestModelMouseIgnoredDuringModals(t *testing.T) {
 	m.Update(mouseAt(headerLines + 1))
 	if got, _ := m.selected(); got.RemotePort != 3000 {
 		t.Error("a click moved the selection while the filter was open")
+	}
+}
+
+// clickAt builds a left-button press at an arbitrary position.
+func clickAt(x, y int) tea.MouseMsg {
+	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+}
+
+// columnX returns the first cell of a named column.
+func columnX(m *Model, title string) int {
+	for _, c := range m.columns() {
+		if c.title == title {
+			return c.x
+		}
+	}
+	return -1
+}
+
+func TestModelClickColumnHeaderSorts(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 100, "a"), row(8080, 200, "b")))
+
+	m.Update(clickAt(columnX(m, "PROCESS"), columnRow))
+	if m.sortKey != SortProcess {
+		t.Errorf("clicking PROCESS sorted by %q, want process", m.sortKey)
+	}
+	if m.reverse {
+		t.Error("a new sort column should start un-reversed")
+	}
+
+	// Clicking the active column again reverses it.
+	m.Update(clickAt(columnX(m, "PROCESS"), columnRow))
+	if !m.reverse {
+		t.Error("clicking the active sort column should reverse it")
+	}
+
+	m.Update(clickAt(columnX(m, "LOCAL"), columnRow))
+	if m.sortKey != SortLocal || m.reverse {
+		t.Errorf("clicking LOCAL gave %q reverse=%v", m.sortKey, m.reverse)
+	}
+}
+
+// The header shows which column is sorted, so the ordering is never a mystery.
+func TestViewHeaderMarksTheSortColumn(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "a")))
+	send(m, "s") // remote -> local
+	if !strings.Contains(plainView(m), "↓LOCAL") {
+		t.Errorf("the sorted column is not marked:\n%s", plainView(m))
+	}
+	send(m, "r")
+	if !strings.Contains(plainView(m), "↑LOCAL") {
+		t.Errorf("the reverse indicator is missing:\n%s", plainView(m))
+	}
+}
+
+func TestModelClickViaCellCyclesScheme(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
+	m := newModel(t, stub)
+
+	m.Update(clickAt(columnX(m, "VIA"), headerLines))
+	if got := stub.schemes[3000]; got != tunnel.SchemeHTTP {
+		t.Errorf("clicking VIA gave %q, want http", got)
+	}
+
+	m.Update(clickAt(columnX(m, "VIA"), headerLines))
+	if got := stub.schemes[3000]; got != tunnel.SchemeHTTPS {
+		t.Errorf("clicking VIA again gave %q, want https", got)
+	}
+}
+
+// A click on VIA must not also count towards a double click, or cycling twice
+// would open a browser.
+func TestModelClickViaDoesNotOpen(t *testing.T) {
+	var opened []string
+	stub := newStub(row(3000, 3000, "node"))
+	now := testNow
+	m := New(stub, Options{
+		Host: "devbox", Now: func() time.Time { return now },
+		OpenURL: func(u string) error { opened = append(opened, u); return nil },
+	})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.reload()
+
+	m.Update(clickAt(columnX(m, "VIA"), headerLines))
+	now = now.Add(50 * time.Millisecond)
+	m.Update(clickAt(columnX(m, "VIA"), headerLines))
+
+	if len(opened) != 0 {
+		t.Errorf("cycling the protocol opened %v", opened)
+	}
+}
+
+// footerZoneX returns the middle of a key bar entry, after rendering it.
+func footerZoneX(t *testing.T, m *Model, id string) int {
+	t.Helper()
+	_ = m.View() // zones are recorded as the bar renders
+	for _, z := range m.footerZones {
+		if z.id == id {
+			return (z.x0 + z.x1) / 2
+		}
+	}
+	t.Fatalf("no footer zone for %q", id)
+	return -1
+}
+
+func TestModelClickFooterActions(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
+	m := newModel(t, stub)
+	// Wide enough that every hint fits and therefore has a zone.
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
+	m.reload()
+	footerY := m.height - 1
+
+	// Filter
+	m.Update(clickAt(footerZoneX(t, m, "/"), footerY))
+	if !m.filtering {
+		t.Error("clicking / should open the filter")
+	}
+	// A click elsewhere commits the filter rather than editing blindly.
+	m.Update(clickAt(1, headerLines))
+	if m.filtering {
+		t.Error("clicking away should close the filter editor")
+	}
+
+	// Detail
+	m.Update(clickAt(footerZoneX(t, m, "enter"), footerY))
+	if !m.showDetail {
+		t.Error("clicking enter should open the detail pane")
+	}
+	// And a click anywhere dismisses the overlay.
+	m.Update(clickAt(1, headerLines))
+	if m.showDetail {
+		t.Error("clicking should dismiss the detail overlay")
+	}
+
+	// Help
+	m.Update(clickAt(footerZoneX(t, m, "?"), footerY))
+	if !m.showHelp {
+		t.Error("clicking ? should open help")
+	}
+	m.Update(clickAt(1, headerLines))
+
+	// Attach
+	m.Update(clickAt(footerZoneX(t, m, "a"), footerY))
+	stub.mu.Lock()
+	toggled := len(stub.toggled)
+	stub.mu.Unlock()
+	if toggled != 1 {
+		t.Errorf("clicking a toggled %d times, want 1", toggled)
+	}
+
+	// Quit asks for confirmation rather than exiting on a stray click.
+	m.Update(clickAt(footerZoneX(t, m, "esc"), footerY))
+	if !m.confirming {
+		t.Error("clicking esc should open the quit confirmation")
+	}
+	if m.quit {
+		t.Error("a click must never quit outright")
+	}
+}
+
+func TestModelClickSortFooterCycles(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "node")))
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
+	m.reload()
+	before := m.sortKey
+	m.Update(clickAt(footerZoneX(t, m, "s"), m.height-1))
+	if m.sortKey == before {
+		t.Error("clicking s should cycle the sort")
+	}
+}
+
+// The quit confirmation is modal: a stray click must not dismiss it.
+func TestModelConfirmIgnoresClicks(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "node")))
+	send(m, "esc")
+	m.Update(clickAt(1, headerLines))
+	if !m.confirming {
+		t.Error("a click should not dismiss the quit confirmation")
+	}
+}
+
+func TestModelWheelIgnoredUnderOverlays(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "a"), row(4000, 4000, "b")))
+	send(m, "?")
+	wheel := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
+	m.Update(wheel)
+	if m.cursor != 0 {
+		t.Error("the wheel should not scroll the table under an overlay")
 	}
 }

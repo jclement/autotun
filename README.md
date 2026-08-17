@@ -137,12 +137,18 @@ loud error instead, if you'd rather it just fail.
 back the *same local port it had before*. Your browser tab keeps working. Your `curl` in a
 loop keeps working. You possibly don't even notice, which is the goal.
 
-**It doesn't poke your services.** autotun figures out which ports speak HTTPS by offering a
-TLS handshake — that's it. It will never fire a speculative `GET /` at an unidentified port,
-because "what happens if you send HTTP to the production-shaped database on 5432" is a
-question best left unanswered. Anything it can't identify says `unknown` and opens as HTTP,
-until you press `t` or click the cell — after which it remembers your answer for that host and
-port forever.
+**It never sends your services anything they didn't ask for.** autotun does not probe. It
+doesn't open a speculative connection, doesn't fire a `GET /`, and doesn't offer a TLS
+handshake to see what sticks — a ClientHello arrives at a plain HTTP server as a line of
+binary garbage, and the server logs it as a malformed request. Fair enough.
+
+Instead it reads the first bytes of replies that were crossing the tunnel anyway: a TLS server
+opens with a handshake or an alert record, an HTTP server opens with its status line. Free,
+silent, and it self-corrects — point it at an HTTPS service over plain HTTP and the alert it
+sends back is what teaches autotun it was HTTPS all along.
+
+Until something is known, a port says `unknown` and `o` politely refuses rather than guessing:
+press `t` to say which it is, and that answer is remembered for that host and port forever.
 
 **It's a real SSH client, not a wrapper.** `golang.org/x/crypto/ssh`, one `direct-tcpip`
 channel per connection. It never shells out to `ssh -L`. That's what makes the live byte
@@ -155,9 +161,9 @@ someone else's stderr and hoping.
 |---|---|
 | `↑↓` / `j k`, `g` / `G`, `pgup` / `pgdn` | move around — nothing is highlighted until you do |
 | `enter`, `d` | detail pane |
-| `o`, `space` | open in a browser |
+| `t` | say http / https — **remembered** |
+| `o`, `space` | open in a browser (needs `t` first) |
 | `a` | auto → always on → never — **remembered** |
-| `t` | set http / https — **remembered** |
 | `l` | pin the local port — **remembered** |
 | `y` | copy the URL to your clipboard |
 | `c` | settings popup — what is listed and how, **remembered per host** |

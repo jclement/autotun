@@ -322,7 +322,6 @@ func baseConfig(remote *fakeRemote) Config {
 		ConnectTimeout: 5 * time.Second,
 		InsecureHost:   true,
 		Plain:          true,
-		NoDetect:       true,
 	}
 }
 

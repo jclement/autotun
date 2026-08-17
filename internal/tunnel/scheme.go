@@ -1,9 +1,7 @@
 package tunnel
 
 import (
-	"crypto/tls"
-	"net"
-	"time"
+	"bytes"
 )
 
 // Scheme is what a forwarded port turns out to speak. It decides the URL the
@@ -43,7 +41,8 @@ func ParseScheme(s string) Scheme {
 	}
 }
 
-// URLScheme returns the scheme to build a URL with, defaulting to http.
+// URLScheme returns the scheme to build a URL with. Unknown falls back to
+// http, but callers are expected to ask before opening rather than lean on it.
 func (s Scheme) URLScheme() string {
 	if s == SchemeHTTPS {
 		return "https"
@@ -60,33 +59,27 @@ func (s Scheme) Label() string {
 	return string(s)
 }
 
-// probeTimeout bounds the TLS detection handshake.
-const probeTimeout = 4 * time.Second
-
-// detectScheme guesses whether a remote service speaks TLS.
+// SniffScheme classifies a service from the first bytes it sends in reply.
 //
-// It only ever attempts a TLS handshake. A successful one is conclusive
-// evidence of HTTPS; a failure proves nothing, so the scheme is left unknown
-// rather than being asserted as HTTP. Deliberately no plaintext HTTP probe is
-// sent: firing a GET at whatever happens to be listening — a database, a
-// message broker — is not something a port forwarder should do uninvited.
-func detectScheme(d Dialer, addr string) Scheme {
-	conn, err := d.Dial("tcp", addr)
-	if err != nil {
+// This is deliberately passive. Actively probing means opening a connection and
+// speaking a protocol at whatever is listening: a TLS ClientHello arrives at a
+// plain HTTP server as a line of binary garbage, and the server logs it as a
+// malformed request. Watching bytes that were going to cross the tunnel anyway
+// costs nothing and startles nobody.
+//
+// A TLS server opens with a handshake record (0x16) or an alert (0x15) — the
+// alert being what it sends when a browser speaks plaintext at it, which is
+// exactly the case worth catching. An HTTP server opens with its status line.
+func SniffScheme(b []byte) Scheme {
+	if len(b) == 0 {
 		return SchemeUnknown
 	}
-	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(probeTimeout))
-	tlsConn := tls.Client(conn, &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // identity is irrelevant; we only want to know if it speaks TLS
-		ServerName:         "localhost",
-	})
-	if err := tlsConn.Handshake(); err != nil {
-		return SchemeUnknown
+	switch b[0] {
+	case 0x16, 0x15: // TLS handshake, TLS alert
+		return SchemeHTTPS
 	}
-	return SchemeHTTPS
+	if bytes.HasPrefix(b, []byte("HTTP/")) {
+		return SchemeHTTP
+	}
+	return SchemeUnknown
 }
-
-// ensure detectScheme's signature stays compatible with net.Dialer in tests.
-var _ = func() Dialer { return &net.Dialer{} }

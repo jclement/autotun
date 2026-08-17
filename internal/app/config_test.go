@@ -45,9 +45,6 @@ func TestFlagDefaults(t *testing.T) {
 	if cfg.Existing {
 		t.Error("--existing should be off by default")
 	}
-	if cfg.NoDetect {
-		t.Error("scheme detection should be on by default")
-	}
 }
 
 func TestFlagParsing(t *testing.T) {
@@ -57,7 +54,7 @@ func TestFlagParsing(t *testing.T) {
 		"--existing", "--include", "3000,8000-9000", "--exclude", "8080",
 		"--min-port", "2000", "--max-port", "60000",
 		"--remote-bind", "loopback", "--same-port",
-		"--interval", "500ms", "--json", "--no-dissolve", "--no-detect",
+		"--interval", "500ms", "--json", "--no-dissolve",
 		"devbox",
 	)
 	if err != nil {

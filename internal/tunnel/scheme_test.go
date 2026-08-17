@@ -1,16 +1,10 @@
 package tunnel
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -72,87 +66,6 @@ func TestSchemeLabel(t *testing.T) {
 	}
 	if got := SchemeHTTPS.Label(); got != "https" {
 		t.Errorf("https label = %q", got)
-	}
-}
-
-// tlsServer starts a TLS listener with a self-signed certificate.
-func tlsServer(t *testing.T) string {
-	t.Helper()
-
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "localhost"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		DNSNames:     []string{"localhost"},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cert, err := tls.X509KeyPair(
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ln.Close() })
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer conn.Close()
-				_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\n\r\n")
-			}()
-		}
-	}()
-	return ln.Addr().String()
-}
-
-func TestDetectSchemeFindsTLS(t *testing.T) {
-	addr := tlsServer(t)
-	if got := detectScheme(&net.Dialer{}, addr); got != SchemeHTTPS {
-		t.Errorf("detectScheme against a TLS server = %q, want https", got)
-	}
-}
-
-// A plaintext server must be left unknown rather than asserted as http: the
-// probe only sends a ClientHello, so a failure proves nothing.
-func TestDetectSchemeLeavesPlaintextUnknown(t *testing.T) {
-	echo := newEchoServer(t)
-	if got := detectScheme(&net.Dialer{}, echo.addr()); got != SchemeUnknown {
-		t.Errorf("detectScheme against a plaintext server = %q, want unknown", got)
-	}
-}
-
-func TestDetectSchemeHandlesADeadPort(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	ln.Close()
-
-	if got := detectScheme(&net.Dialer{}, addr); got != SchemeUnknown {
-		t.Errorf("detectScheme against a closed port = %q, want unknown", got)
 	}
 }
 
@@ -261,67 +174,130 @@ func TestManagerRestoresRememberedScheme(t *testing.T) {
 	}
 }
 
-func TestManagerDetectionDoesNotOverridePinnedSchemes(t *testing.T) {
+func TestSniffScheme(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []byte
+		want Scheme
+	}{
+		{"tls handshake", []byte{0x16, 0x03, 0x01, 0x00}, SchemeHTTPS},
+		{"tls alert", []byte{0x15, 0x03, 0x01}, SchemeHTTPS},
+		{"http status line", []byte("HTTP/1.1 200 OK"), SchemeHTTP},
+		{"http 400", []byte("HTTP/1.0 400 Bad Request"), SchemeHTTP},
+		{"ssh banner", []byte("SSH-2.0-OpenSSH"), SchemeUnknown},
+		{"postgres", []byte{0x52, 0x00, 0x00}, SchemeUnknown},
+		{"empty", nil, SchemeUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SniffScheme(tt.in); got != tt.want {
+				t.Errorf("SniffScheme(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// The service is identified from bytes already crossing the tunnel. Nothing is
+// sent to it that a client did not send, so a plain HTTP server never logs a
+// mysterious binary request.
+func TestManagerLearnsTheSchemeFromTraffic(t *testing.T) {
+	reply := newReplyServer(t, "HTTP/1.1 200 OK\r\n\r\nhi")
+	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: reply}, Options{
+		Policy: DefaultPolicy(),
+		Host:   "devbox",
+	})
+	defer m.Close()
+
+	port := freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(port))
+
+	st := stateFor(t, m, port)
+	if st.Scheme != SchemeUnknown {
+		t.Fatalf("scheme = %q before any traffic, want unknown", st.Scheme)
+	}
+
+	// One real connection is all it takes.
+	if got := readAll(t, st.LocalPort); !strings.HasPrefix(got, "HTTP/1.1 200") {
+		t.Fatalf("reply = %q", got)
+	}
+	waitUntil(t, func() bool {
+		return stateFor(t, m, port).Scheme == SchemeHTTP
+	}, "the scheme to be learned from the reply")
+}
+
+// A TLS service answers a plaintext request with an alert record, which is
+// exactly the case worth catching.
+func TestManagerLearnsHTTPSFromATLSAlert(t *testing.T) {
+	reply := newReplyServer(t, "\x15\x03\x01\x00\x02\x02\x46")
+	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: reply}, Options{
+		Policy: DefaultPolicy(),
+		Host:   "devbox",
+	})
+	defer m.Close()
+
+	port := freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(port))
+
+	readAll(t, stateFor(t, m, port).LocalPort)
+	waitUntil(t, func() bool {
+		return stateFor(t, m, port).Scheme == SchemeHTTPS
+	}, "an alert record to be read as https")
+}
+
+// Sniffing must not eat or reorder the reply.
+func TestSniffingRelaysTheReplyIntact(t *testing.T) {
+	body := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+	reply := newReplyServer(t, body)
+	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: reply}, Options{Policy: DefaultPolicy()})
+	defer m.Close()
+
+	port := freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(port))
+
+	if got := readAll(t, stateFor(t, m, port).LocalPort); got != body {
+		t.Errorf("relayed %q, want the reply unchanged", got)
+	}
+}
+
+// A reply shorter than the sniff window must still arrive.
+func TestSniffingRelaysAShortReply(t *testing.T) {
+	reply := newReplyServer(t, "ok")
+	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: reply}, Options{Policy: DefaultPolicy()})
+	defer m.Close()
+
+	port := freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(port))
+
+	if got := readAll(t, stateFor(t, m, port).LocalPort); got != "ok" {
+		t.Errorf("relayed %q, want %q", got, "ok")
+	}
+}
+
+func TestObservedSchemeDoesNotOverrideAPin(t *testing.T) {
 	memory := newMemoryStore()
 	port := freePort(t)
 	memory.SetPort("devbox", port, config.Port{Scheme: "http"})
 
-	// The dialer points at a real TLS server, so detection would say https.
-	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: tlsServer(t)}, Options{
-		Policy:        DefaultPolicy(),
-		Host:          "devbox",
-		Settings:      memory,
-		DetectSchemes: true,
+	// The service answers with a TLS record, which would otherwise be read as
+	// https and overwrite the pin.
+	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: newReplyServer(t, "\x16\x03\x01")}, Options{
+		Policy:   DefaultPolicy(),
+		Host:     "devbox",
+		Settings: memory,
 	})
 	defer m.Close()
 
 	m.Sync(probe.Snapshot{})
 	m.Sync(snapshotOf(port))
 
-	// Give any detection goroutine a chance to run and be ignored.
-	time.Sleep(300 * time.Millisecond)
+	readAll(t, stateFor(t, m, port).LocalPort)
+	time.Sleep(200 * time.Millisecond)
 	if st := stateFor(t, m, port); st.Scheme != SchemeHTTP {
-		t.Errorf("scheme = %q, want the pinned http to survive detection", st.Scheme)
-	}
-}
-
-func TestManagerDetectsHTTPS(t *testing.T) {
-	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: tlsServer(t)}, Options{
-		Policy:        DefaultPolicy(),
-		Host:          "devbox",
-		DetectSchemes: true,
-	})
-	defer m.Close()
-
-	port := freePort(t)
-	m.Sync(probe.Snapshot{})
-	m.Sync(snapshotOf(port))
-
-	waitUntil(t, func() bool {
-		return stateFor(t, m, port).Scheme == SchemeHTTPS
-	}, "the TLS probe to report https")
-
-	// A detected scheme is not pinned, so it is not written to the store.
-	if st := stateFor(t, m, port); st.SchemePinned {
-		t.Error("a detected scheme should not be pinned")
-	}
-}
-
-func TestManagerDetectionCanBeDisabled(t *testing.T) {
-	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: tlsServer(t)}, Options{
-		Policy:        DefaultPolicy(),
-		Host:          "devbox",
-		DetectSchemes: false,
-	})
-	defer m.Close()
-
-	port := freePort(t)
-	m.Sync(probe.Snapshot{})
-	m.Sync(snapshotOf(port))
-
-	time.Sleep(300 * time.Millisecond)
-	if st := stateFor(t, m, port); st.Scheme != SchemeUnknown {
-		t.Errorf("scheme = %q, want unknown with detection off", st.Scheme)
+		t.Errorf("scheme = %q, want the pinned http to survive what the wire said", st.Scheme)
 	}
 }
 
@@ -333,4 +309,45 @@ func TestManagerCycleSchemeOnAnUnknownPort(t *testing.T) {
 	if got := m.CycleScheme(9999); got != SchemeUnknown {
 		t.Errorf("CycleScheme on an unknown port = %q, want unknown", got)
 	}
+}
+
+// newReplyServer accepts a connection, sends a fixed reply and closes.
+func newReplyServer(t *testing.T, reply string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.WriteString(c, reply)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// readAll opens a local tunnel port and reads until the far side closes.
+func readAll(t *testing.T, port int) string {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 3*time.Second)
+	if err != nil {
+		t.Fatalf("dialing local port %d: %v", port, err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	data, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("reading: %v", err)
+	}
+	return string(data)
 }

@@ -125,9 +125,8 @@ type entry struct {
 	firstSeen   time.Time
 	missing     int
 
-	scheme   Scheme
-	pinned   bool // the user chose the scheme; never overwrite it by detection
-	detected bool // detection has already run for this entry
+	scheme Scheme
+	pinned bool // the user chose the scheme; never overwrite it by observation
 }
 
 // Manager keeps local listeners in sync with the set of services discovered on
@@ -150,7 +149,6 @@ type Manager struct {
 
 	host     string
 	settings Settings
-	detect   bool
 }
 
 // Settings remembers per-port decisions across runs. *config.Store satisfies
@@ -167,8 +165,6 @@ type Options struct {
 	Host string
 	// Settings, if set, persists the user's per-port decisions.
 	Settings Settings
-	// DetectSchemes enables the TLS probe on newly opened tunnels.
-	DetectSchemes bool
 	// Grace is how many consecutive scans a service may be absent before its
 	// tunnel is torn down. Two absorbs a single dropped scan without leaving
 	// dead listeners around.
@@ -203,7 +199,6 @@ func New(alloc *Allocator, dialer Dialer, opts Options) *Manager {
 		baseline: map[int]bool{},
 		host:     opts.Host,
 		settings: opts.Settings,
-		detect:   opts.DetectSchemes,
 	}
 }
 
@@ -297,28 +292,28 @@ func (m *Manager) applyLocked(e *entry, now time.Time) []Event {
 		return []Event{{Kind: EventFailed, At: now, State: m.stateLocked(e), Msg: e.err}}
 	}
 	e.err = ""
-	e.fwd = newForwarder(ln, m.dialer, e.svc.DialAddr(), remapped, now)
-
-	// Work out whether this port speaks TLS, once, in the background — never
-	// overriding a scheme the user pinned.
-	if m.detect && !e.pinned && !e.detected {
-		e.detected = true
-		go m.detectFor(e.svc.Port, e.svc.DialAddr(), m.dialer)
-	}
+	port := e.svc.Port
+	// What a service turns out to be is learned from the replies it sends
+	// through the tunnel, never by probing it.
+	e.fwd = newForwarder(ln, m.dialer, e.svc.DialAddr(), remapped, now, func(scheme Scheme) {
+		m.observeScheme(port, scheme)
+	})
 	return []Event{{Kind: EventOpened, At: now, State: m.stateLocked(e)}}
 }
 
-// detectFor probes a newly opened tunnel and records what it found.
-func (m *Manager) detectFor(port int, addr string, d Dialer) {
-	scheme := detectScheme(d, addr)
+// observeScheme records what a service revealed itself to be. A scheme the
+// user pinned is never overwritten.
+func (m *Manager) observeScheme(port int, scheme Scheme) {
 	if scheme == SchemeUnknown {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if e, ok := m.entries[port]; ok && !e.pinned {
+	e, ok := m.entries[port]
+	changed := ok && !e.pinned && e.scheme != scheme
+	if changed {
 		e.scheme = scheme
 	}
+	m.mu.Unlock()
 }
 
 // CycleScheme steps a port's scheme through unknown → http → https and

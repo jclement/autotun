@@ -618,7 +618,7 @@ func TestModelOpenURL(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.reload()
 
-	send(m, "down", "o")
+	send(m, "down", "t", "o") // opening needs a known protocol
 	if len(opened) != 1 || opened[0] != "http://127.0.0.1:3000" {
 		t.Errorf("opened = %v, want the tunnel URL", opened)
 	}

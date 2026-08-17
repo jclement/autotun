@@ -34,7 +34,6 @@ type Config struct {
 	RemoteBind string
 	SamePort   bool
 	Interval   time.Duration
-	NoDetect   bool
 
 	// Output
 	Plain      bool
@@ -69,7 +68,6 @@ func (c *Config) Flags(name string, errOut io.Writer) *pflag.FlagSet {
 	fs.StringVar(&c.RemoteBind, "remote-bind", string(tunnel.BindAny), `which remote binds to forward: "any" or "loopback"`)
 	fs.BoolVar(&c.SamePort, "same-port", false, "never remap; a busy local port is an error")
 	fs.DurationVar(&c.Interval, "interval", 2*time.Second, "how often to scan the remote for new ports")
-	fs.BoolVar(&c.NoDetect, "no-detect", false, "do not probe new tunnels to detect HTTPS")
 
 	fs.BoolVar(&c.Plain, "plain", false, "line-oriented output instead of the TUI")
 	fs.BoolVar(&c.JSON, "json", false, "newline-delimited JSON events (implies --plain)")

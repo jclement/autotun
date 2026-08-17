@@ -187,9 +187,10 @@ func TestModelSchemeChangesTheOpenedURL(t *testing.T) {
 	}
 }
 
-// An unconfirmed scheme is shown as "http?" rather than refusing to open, so
-// space and o behave identically and never make you press another key first.
-func TestModelSpaceOpensWithTheAssumedScheme(t *testing.T) {
+// Opening an unidentified port would mean guessing at its protocol, and a
+// wrong guess sends a plaintext request at something that may not want one.
+// It asks instead — one keystroke, and the answer is remembered.
+func TestModelOpenRequiresAKnownScheme(t *testing.T) {
 	var opened []string
 	stub := newStub(row(3000, 3000, "node"))
 	m := New(stub, Options{
@@ -200,14 +201,21 @@ func TestModelSpaceOpensWithTheAssumedScheme(t *testing.T) {
 	m.reload()
 
 	send(m, "down", " ")
-	if len(opened) != 1 || opened[0] != "http://127.0.0.1:3000" {
-		t.Errorf("opened = %v, want http assumed for an unknown scheme", opened)
+	if len(opened) != 0 {
+		t.Errorf("opened %v without knowing the protocol", opened)
+	}
+	if !m.toast.Bad || !strings.Contains(m.toast.Text, "press t") {
+		t.Errorf("toast = %q, should point at the t key", m.toast.Text)
 	}
 
-	// And once https is pinned, that is what opens.
-	send(m, "t", "t", " ")
+	// Once told, it opens with what it was told.
+	send(m, "t", " ")
+	if len(opened) != 1 || opened[0] != "http://127.0.0.1:3000" {
+		t.Errorf("opened = %v, want the http URL once set", opened)
+	}
+	send(m, "t", " ")
 	if len(opened) != 2 || opened[1] != "https://127.0.0.1:3000" {
-		t.Errorf("opened = %v, want the https URL after pinning", opened)
+		t.Errorf("opened = %v, want the https URL after switching", opened)
 	}
 }
 
@@ -250,7 +258,7 @@ func TestModelDoubleClickOpens(t *testing.T) {
 	})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.reload()
-	send(m, "t") // make the scheme known so opening is allowed
+	send(m, "down", "t") // opening needs a known protocol
 
 	m.Update(mouseAt(headerLines))
 	if len(opened) != 0 {
@@ -282,7 +290,7 @@ func TestModelSlowDoubleClickDoesNotOpen(t *testing.T) {
 	})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.reload()
-	send(m, "t")
+	send(m, "down", "t")
 
 	m.Update(mouseAt(headerLines))
 	now = now.Add(2 * time.Second)

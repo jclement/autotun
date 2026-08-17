@@ -127,10 +127,9 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 
 	var prog *tea.Program
 	mgr := tunnel.New(alloc, client, tunnel.Options{
-		Policy:        policy,
-		Host:          host,
-		Settings:      settings,
-		DetectSchemes: !cfg.NoDetect,
+		Policy:   policy,
+		Host:     host,
+		Settings: settings,
 		OnEvent: func(e tunnel.Event) {
 			renderer.Event(e)
 		},

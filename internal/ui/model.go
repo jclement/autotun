@@ -714,8 +714,6 @@ func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
 	case "t":
 		return m.cycleScheme()
 	case " ", "o":
-		// The VIA column shows which scheme will be used, including when it is
-		// still an unconfirmed "http?", so opening never needs to refuse.
 		return m.openSelected()
 	case "y":
 		return m.copySelected()
@@ -764,6 +762,15 @@ func (m *Model) openSelected() tea.Cmd {
 	st, ok := m.selected()
 	if !ok {
 		return m.needSelection()
+	}
+	// Opening an unidentified port means guessing at its protocol, and a wrong
+	// guess sends a plaintext request at something that may not want one. Ask
+	// instead: it is one keystroke, and the answer is remembered.
+	if st.Scheme == tunnel.SchemeUnknown {
+		return m.showToast(ToastMsg{
+			Text: "remote " + itoa(st.RemotePort) + ": press t to say http or https first",
+			Bad:  true,
+		})
 	}
 	url := st.URL()
 	if url == "" {

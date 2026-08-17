@@ -204,7 +204,6 @@ func run(t *testing.T, r *remote, extra ...string) *session {
 		"-p", r.sshPort,
 		"-l", "dev",
 		"--interval", "500ms",
-		"--no-detect",
 	}, extra...)
 	args = append(args, "127.0.0.1")
 

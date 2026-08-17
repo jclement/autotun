@@ -696,9 +696,9 @@ func (m *Model) helpBox() string {
 		}},
 		{"a port", [][2]string{
 			{"enter, d", "detail"},
-			{"o, space", "open in browser"},
+			{"t", "say http or https (remembered)"},
+			{"o, space", "open in browser — needs t first"},
 			{"a", "auto → on → off (remembered)"},
-			{"t", "http / https (remembered)"},
 			{"l", "set the local port (remembered)"},
 			{"y", "copy the URL to your clipboard"},
 		}},

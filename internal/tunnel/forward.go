@@ -34,13 +34,19 @@ type forwarder struct {
 
 	lastErr atomic.Pointer[string]
 
+	// onScheme is called with what the service turned out to be, the first
+	// time a reply says anything conclusive.
+	onScheme func(Scheme)
+	sniffed  atomic.Bool
+
 	closeOnce sync.Once
 	done      chan struct{}
 	wg        sync.WaitGroup
 }
 
-func newForwarder(ln net.Listener, d Dialer, dialAddr string, remapped bool, now time.Time) *forwarder {
+func newForwarder(ln net.Listener, d Dialer, dialAddr string, remapped bool, now time.Time, onScheme func(Scheme)) *forwarder {
 	f := &forwarder{
+		onScheme: onScheme,
 		ln:       ln,
 		dialer:   d,
 		dialAddr: dialAddr,
@@ -107,12 +113,43 @@ func (f *forwarder) handle(local net.Conn) {
 	}()
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(local, remote)
-		f.in.Add(uint64(n))
+		n := f.copyReply(local, remote)
+		f.in.Add(n)
 		f.touch()
 		halfClose(local)
 	}()
 	wg.Wait()
+}
+
+// copyReply forwards the service's reply, classifying it from its opening
+// bytes on the way past. The bytes are relayed unchanged; nothing is withheld
+// or injected.
+func (f *forwarder) copyReply(dst io.Writer, src io.Reader) uint64 {
+	var total uint64
+
+	if f.onScheme != nil && f.sniffed.CompareAndSwap(false, true) {
+		// A single Read, never ReadFull: a reply shorter than the buffer that
+		// then waits for the client — which plenty of protocols do — would
+		// block forever, wedging the tunnel on its first connection.
+		head := make([]byte, 8)
+		n, err := src.Read(head)
+		if n > 0 {
+			if scheme := SniffScheme(head[:n]); scheme != SchemeUnknown {
+				f.onScheme(scheme)
+			}
+			written, werr := dst.Write(head[:n])
+			total += uint64(written)
+			if werr != nil {
+				return total
+			}
+		}
+		if err != nil {
+			return total
+		}
+	}
+
+	n, _ := io.Copy(dst, src)
+	return total + uint64(n)
 }
 
 // halfClose shuts down the write side if the connection supports it, so the

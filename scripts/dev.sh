@@ -11,13 +11,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Version managers sometimes point GOBIN inside the toolchain itself, where an
-# installed binary disappears on the next Go upgrade. Fall back to GOPATH/bin
-# whenever GOBIN is unset or lives under GOROOT.
-BIN_DIR="$(go env GOBIN)"
-case "$BIN_DIR" in
-"" | "$(go env GOROOT)"/*) BIN_DIR="$(go env GOPATH)/bin" ;;
-esac
+# GOBIN is deliberately ignored: a version manager can point it inside the
+# toolchain it manages, where the installed binary vanishes on the next Go
+# upgrade. GOPATH/bin is stable across those.
+BIN_DIR="$(go env GOPATH)/bin"
 DEV_BIN="$BIN_DIR/autotun-dev"
 
 echo "› building…"

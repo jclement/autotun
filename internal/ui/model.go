@@ -26,7 +26,10 @@ type Controller interface {
 type ConnState string
 
 const (
-	Connecting   ConnState = "connecting"
+	Connecting ConnState = "connecting"
+	// Probing is the gap between a working SSH connection and the first scan,
+	// while the remote picks a discovery tool and starts reporting.
+	Probing      ConnState = "probing"
 	Connected    ConnState = "connected"
 	Reconnecting ConnState = "reconnecting"
 	Disconnected ConnState = "disconnected"

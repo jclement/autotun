@@ -430,3 +430,38 @@ func TestViewEditorAppearsInTheBottomBorder(t *testing.T) {
 		t.Error("the editor should explain how to reset")
 	}
 }
+
+// On a very wide terminal the table must stop stretching, or the right-hand
+// columns end up a screenful away from the row they describe.
+func TestViewCapsTheProcessColumn(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "node vite")))
+	m.Update(tea.WindowSizeMsg{Width: 400, Height: 20})
+	m.reload()
+
+	if got := m.procWidth(); got != maxProc {
+		t.Errorf("procWidth at 400 columns = %d, want it capped at %d", got, maxProc)
+	}
+
+	// The columns still line up under their headers.
+	cols := m.columns()
+	last := cols[len(cols)-1]
+	if last.x+last.w > m.inner()+1 {
+		t.Errorf("the last column ends at %d, past the frame", last.x+last.w)
+	}
+
+	// And a narrow terminal still gets a usable process column.
+	m.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
+	if got := m.procWidth(); got != minProc {
+		t.Errorf("procWidth at 50 columns = %d, want the %d floor", got, minProc)
+	}
+}
+
+// The gap between a working connection and the first scan should say what is
+// happening rather than still claiming to be connecting.
+func TestViewShowsTheProbingStatus(t *testing.T) {
+	m := newModel(t, newStub())
+	m.Update(StatusMsg{State: Probing})
+	if !strings.Contains(plainView(m), "starting remote prober") {
+		t.Errorf("the probing status is not shown:\n%s", plainView(m))
+	}
+}

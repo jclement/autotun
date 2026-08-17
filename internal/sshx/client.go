@@ -99,7 +99,7 @@ func dialSSH(ctx context.Context, d *Destination, opts ConnectOptions, via *ssh.
 	if err != nil {
 		return nil, err
 	}
-	methods, cleanup, err := authMethods(d, opts.Prompter)
+	methods, offered, cleanup, err := authMethods(d, opts.Prompter)
 	if err != nil {
 		return nil, err
 	}
@@ -130,10 +130,34 @@ func dialSSH(ctx context.Context, d *Destination, opts ConnectOptions, via *ssh.
 	sconn, chans, reqs, err := ssh.NewClientConn(conn, d.Addr(), cfg)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("ssh handshake with %s: %w", d.Label(), err)
+		return nil, fmt.Errorf("ssh handshake with %s: %w%s", d.Label(), err, authHint(err, d, offered))
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return ssh.NewClient(sconn, chans, reqs), nil
+}
+
+// authHint adds guidance to an authentication failure, which is otherwise one
+// of the least actionable errors SSH produces.
+func authHint(err error, d *Destination, offered []string) string {
+	if !strings.Contains(err.Error(), "unable to authenticate") {
+		return ""
+	}
+	hint := "\n\nThe server refused every credential offered, in this order:"
+	if len(offered) == 0 {
+		hint += "\n  (none)"
+	}
+	for _, o := range offered {
+		hint += "\n  - " + o
+	}
+	if d.IdentitiesOnly {
+		hint += "\n\nThe agent was not consulted: naming a key with -i, or IdentitiesOnly in" +
+			"\nssh_config, restricts autotun to the keys named there."
+	} else {
+		hint += "\n\nagent keys are offered first, then the ~/.ssh defaults."
+	}
+	hint += "\nIf `ssh " + d.Label() + "` works, check that the agent holding that key is"
+	hint += "\nreachable here (ssh-add -l), or name the key directly with -i."
+	return hint
 }
 
 // parseJumpChain splits a ProxyJump value into hops, nearest first.

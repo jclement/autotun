@@ -248,6 +248,7 @@ func (s *supervisor) run(ctx context.Context) error {
 
 		attempt = 0
 		backoff = backoffStart
+		s.report(ui.StatusMsg{State: ui.Probing})
 
 		mon := probe.NewMonitor(s.client, s.cfg.Interval)
 		err := mon.Run(ctx,

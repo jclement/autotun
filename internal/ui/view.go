@@ -26,6 +26,10 @@ const (
 	wBytes  = 8
 	gap     = 2
 	minProc = 12
+	// A very wide terminal should not stretch PROCESS across the whole screen:
+	// that strands AGE/CONNS/IN/OUT far from the row they describe and leaves a
+	// canyon of whitespace in between. Past this the table just stops growing.
+	maxProc = 56
 )
 
 // Fixed rows of the frame, used for both drawing and mouse hit-testing.
@@ -246,6 +250,8 @@ func (m *Model) statusChip() string {
 			label += " (" + m.status.Mode + ")"
 		}
 		return t.Good.Render("● " + label)
+	case Probing:
+		return t.Warning.Render("◐ starting remote prober")
 	case Reconnecting:
 		s := "reconnecting"
 		if m.status.Attempt > 0 {
@@ -284,6 +290,9 @@ func (m *Model) procWidth() int {
 	w := m.width - used
 	if w < minProc {
 		return minProc
+	}
+	if w > maxProc {
+		return maxProc
 	}
 	return w
 }

@@ -412,12 +412,21 @@ func (m *Manager) stateLocked(e *entry) State {
 	return st
 }
 
-// States returns every known service, ordered by remote port.
+// hiddenLocked reports whether an entry is filtered out of the table entirely.
+// A user override or a live tunnel always keeps a row visible.
+func (m *Manager) hiddenLocked(e *entry) bool {
+	return e.fwd == nil && e.manual == nil && e.skip.Filtered()
+}
+
+// States returns every service worth showing, ordered by remote port.
 func (m *Manager) States() []State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]State, 0, len(m.entries))
 	for _, e := range m.entries {
+		if m.hiddenLocked(e) {
+			continue
+		}
 		out = append(out, m.stateLocked(e))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RemotePort < out[j].RemotePort })

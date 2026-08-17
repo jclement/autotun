@@ -117,6 +117,10 @@ autotun snapshots what's listening the moment it connects and marks it *pre-exis
 dimmed, not forwarded. Want one anyway? Highlight it and press `a`. Want all of them? Pass
 `--existing` and enjoy your postgres on localhost.
 
+Anything ruled out by a *flag* — below `--min-port`, in `--exclude`, outside `--include` —
+doesn't appear at all. You already decided about those; listing sshd on 22 just to tell you it
+is below a limit you set yourself is not information.
+
 **It uses the same port number, and screams when it can't.** Remote 3000 → local 3000, because
 that's the whole point. If 3000 is already taken on your machine you get an ephemeral port and
 a very deliberate `≠` in the table. A silent remap is how you spend twenty minutes debugging

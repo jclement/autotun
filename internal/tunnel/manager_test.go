@@ -376,12 +376,67 @@ func TestManagerExcludeClosesAnOpenTunnel(t *testing.T) {
 	p.Exclude, _ = ParsePortSet(fmt.Sprint(port))
 	m.SetPolicy(p)
 
-	st := stateFor(t, m, port)
-	if st.Status == StatusActive {
-		t.Error("excluding a port should close its tunnel")
+	// Excluding a port closes its tunnel and takes the row away entirely:
+	// having explicitly excluded it, the user is not deciding about it.
+	for _, st := range m.States() {
+		if st.RemotePort == port {
+			t.Fatalf("an excluded port is still listed: %+v", st)
+		}
 	}
-	if st.Skip != SkipExcluded {
-		t.Errorf("skip reason = %q, want excluded", st.Skip)
+	waitUntil(t, func() bool {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return false
+		}
+		ln.Close()
+		return true
+	}, "the excluded port's listener to be released")
+}
+
+// Services ruled out by configuration are noise, not decisions: they never
+// reach the table. Ones skipped by a rule the user can flip stay visible.
+func TestManagerHidesConfigurationFilteredServices(t *testing.T) {
+	p := DefaultPolicy()
+	p.MinPort = 1024
+	m, _, _ := newTestManager(t, p)
+
+	preexisting := freePort(t)
+	m.Sync(snapshotOf(preexisting)) // baseline
+
+	fresh := freePort(t)
+	snap := snapshotOf(preexisting, fresh)
+	// sshd on 22 is below the port window.
+	snap[22] = probe.Service{Port: 22, Binds: []probe.Bind{{Proto: "tcp", Addr: "0.0.0.0"}}, Proc: "sshd"}
+	m.Sync(snap)
+
+	for _, st := range m.States() {
+		if st.RemotePort == 22 {
+			t.Errorf("a port below --min-port was listed: %+v", st)
+		}
+	}
+	// The pre-existing one is still shown, because attaching it is a normal
+	// thing to want to do.
+	if st := stateFor(t, m, preexisting); st.Skip != SkipPreexising {
+		t.Errorf("pre-existing service = %q, want it visible and skipped", st.Skip)
+	}
+	if st := stateFor(t, m, fresh); st.Status != StatusActive {
+		t.Errorf("new service = %q, want active", st.Status)
+	}
+}
+
+func TestSkipFiltered(t *testing.T) {
+	hidden := []Skip{SkipBelowMin, SkipAboveMax, SkipExcluded, SkipNotInclude, SkipNotLoop}
+	shown := []Skip{SkipNone, SkipPreexising, SkipPaused, Skip("detached")}
+
+	for _, s := range hidden {
+		if !s.Filtered() {
+			t.Errorf("%q should be filtered out of the table", s)
+		}
+	}
+	for _, s := range shown {
+		if s.Filtered() {
+			t.Errorf("%q should stay visible", s)
+		}
 	}
 }
 

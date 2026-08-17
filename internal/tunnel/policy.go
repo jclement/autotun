@@ -66,6 +66,22 @@ const (
 	SkipPaused     Skip = "paused"
 )
 
+// Filtered reports whether a skip reason means the service was ruled out by
+// explicit configuration, rather than by a rule the user might want to
+// override from the table.
+//
+// Filtered services are not shown at all: if you set --min-port 1024, sshd on
+// 22 is not something you were deciding about, it is something you already
+// excluded, and listing it is noise. Pre-existing and paused services stay
+// visible, because attaching one is a normal thing to want.
+func (s Skip) Filtered() bool {
+	switch s {
+	case SkipBelowMin, SkipAboveMax, SkipExcluded, SkipNotInclude, SkipNotLoop:
+		return true
+	}
+	return false
+}
+
 // Eval decides whether svc should be forwarded. preexisting reports whether the
 // service was present in the baseline scan taken at connect time.
 //

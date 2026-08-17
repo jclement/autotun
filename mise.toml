@@ -58,11 +58,12 @@ run = "goreleaser release --snapshot --clean"
 # Development loop
 # ---------------------------------------------------------------------------
 
+# No `usage` arg spec here on purpose: declaring one makes mise parse the
+# arguments itself and hand them over as environment variables, so
+# `mise run dev -- somehost` would reach the script with no arguments at all
+# and silently fall through to the local dev box.
 [tasks.dev]
-description = "Build and run against a host, or against a throwaway Docker dev box"
-usage = '''
-arg "[host]" help="SSH destination to tunnel. Omit to boot a local Docker dev box."
-'''
+description = "Build, then tunnel a host — or a throwaway Docker dev box if none is given"
 run = "./scripts/dev.sh"
 
 [tasks."dev:sandbox"]

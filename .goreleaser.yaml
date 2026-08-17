@@ -80,7 +80,9 @@ homebrew_casks:
     repository:
       owner: jclement
       name: homebrew-tap
-      token: '{{ index .Env "HOMEBREW_TAP_TOKEN" }}'
+      # GoReleaser accepts only a bare {{ .Env.VAR }} here — no other
+      # interpolation — so the "is it configured?" test lives in skip_upload.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     # Pushing to another repository needs a PAT that the default GITHUB_TOKEN
     # cannot provide. Without one the release still publishes its binaries and
     # only the tap update is skipped, rather than failing the whole run.

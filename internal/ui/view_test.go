@@ -465,3 +465,37 @@ func TestViewShowsTheProbingStatus(t *testing.T) {
 		t.Errorf("the probing status is not shown:\n%s", plainView(m))
 	}
 }
+
+// The reason a row is not forwarded belongs beside the row, not stranded at the
+// far right of a wide terminal: it starts where AGE — the first column it
+// replaces — begins.
+func TestViewSkipReasonStartsAtTheAgeColumn(t *testing.T) {
+	m := newModel(t, newStub(skippedRow(5432, "postgres", tunnel.SkipPreexising)))
+	m.Update(tea.WindowSizeMsg{Width: 200, Height: 12})
+	m.reload()
+
+	var ageX int
+	for _, c := range m.columns() {
+		if c.title == "AGE" {
+			ageX = c.x
+		}
+	}
+	if ageX == 0 {
+		t.Fatal("no AGE column")
+	}
+
+	for _, line := range strings.Split(plainView(m), "\n") {
+		byteIdx := strings.Index(line, "pre-existing")
+		if byteIdx < 0 {
+			continue
+		}
+		// The row contains multi-byte glyphs, so the byte offset is not the
+		// display column; measure the width of what precedes the match.
+		col := ansi.StringWidth(line[:byteIdx])
+		if col != ageX {
+			t.Errorf("the reason starts at column %d, want the AGE column at %d\n%s", col, ageX, line)
+		}
+		return
+	}
+	t.Error("the reason was not rendered")
+}

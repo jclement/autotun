@@ -496,8 +496,8 @@ func (m *Model) rowText(s tunnel.State, act activity, local, arrow, remote, cmd 
 	mode := modeGlyph(s.Mode)
 
 	// Non-forwarding rows say why, in place of the traffic columns. The reason
-	// is right-aligned to the end of the row so it lines up into a column of
-	// its own rather than drifting into the middle of a wide terminal.
+	// starts at AGE — the first column it replaces — so it stays anchored to
+	// the row it belongs to instead of floating off at the far right.
 	if s.Status != tunnel.StatusActive {
 		reason := string(s.Skip)
 		if s.Status == tunnel.StatusError {
@@ -518,7 +518,7 @@ func (m *Model) rowText(s tunnel.State, act activity, local, arrow, remote, cmd 
 			strings.Repeat(" ", gap) + padLeft(remote, wRemote) + strings.Repeat(" ", gap) +
 			mode + strings.Repeat(" ", gap) +
 			pad(s.Scheme.Label(), wScheme) + strings.Repeat(" ", gap) +
-			pad(cmd, procW) + strings.Repeat(" ", gap) + padLeft(reason, tailW)
+			pad(cmd, procW) + strings.Repeat(" ", gap) + reason
 	}
 
 	cols := []string{

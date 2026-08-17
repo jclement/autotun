@@ -95,12 +95,108 @@ func (p Port) IsZero() bool {
 
 // Host holds the remembered settings for one destination.
 type Host struct {
-	View  string       `yaml:"view,omitempty"`
+	// View is the older name for ShowPreexisting; it is still read so an
+	// existing config keeps working.
+	View string `yaml:"view,omitempty"`
+
+	ShowPreexisting bool   `yaml:"show_preexisting,omitempty"`
+	Sort            string `yaml:"sort,omitempty"`
+	Reverse         bool   `yaml:"reverse,omitempty"`
+	// InactiveLast defaults to true, so it is a pointer: absent means "not
+	// configured", which is different from "explicitly off".
+	InactiveLast *bool `yaml:"inactive_last,omitempty"`
+
 	Ports map[int]Port `yaml:"ports,omitempty"`
 }
 
 // IsZero reports whether the host entry holds nothing worth persisting.
-func (h Host) IsZero() bool { return h.View == "" && len(h.Ports) == 0 }
+func (h Host) IsZero() bool {
+	return h.View == "" && !h.ShowPreexisting && h.Sort == "" && !h.Reverse &&
+		h.InactiveLast == nil && len(h.Ports) == 0
+}
+
+// ViewPrefs is how a host's table is presented. These are display choices
+// only: none of them forwards or stops forwarding anything.
+type ViewPrefs struct {
+	// ShowPreexisting lists services that were already running when autotun
+	// connected. They are still not forwarded — that needs --existing, or
+	// setting the port to "on".
+	ShowPreexisting bool
+	// InactiveLast sinks rows with no tunnel below the ones that have them.
+	InactiveLast bool
+	// Sort names the ordering, e.g. "port" or "recent".
+	Sort    string
+	Reverse bool
+}
+
+// DefaultViewPrefs is how a host is presented before anyone changes anything.
+func DefaultViewPrefs() ViewPrefs {
+	return ViewPrefs{InactiveLast: true, Sort: "port"}
+}
+
+// ViewPrefs returns a host's presentation settings.
+func (s *Store) ViewPrefs(host string) ViewPrefs {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h := s.hosts[host]
+	p := DefaultViewPrefs()
+	// The older "view: everything" meant the same thing this now calls
+	// showing pre-existing services.
+	p.ShowPreexisting = h.ShowPreexisting || ParseView(h.View) == ViewEverything
+	if h.Sort != "" {
+		p.Sort = h.Sort
+	}
+	p.Reverse = h.Reverse
+	if h.InactiveLast != nil {
+		p.InactiveLast = *h.InactiveLast
+	}
+	return p
+}
+
+// SetViewPrefs records a host's presentation settings.
+func (s *Store) SetViewPrefs(host string, p ViewPrefs) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h := s.hosts[host]
+	next := h
+	next.View = "" // superseded by ShowPreexisting
+	next.ShowPreexisting = p.ShowPreexisting
+	next.Sort = ""
+	if p.Sort != "" && p.Sort != DefaultViewPrefs().Sort {
+		next.Sort = p.Sort
+	}
+	next.Reverse = p.Reverse
+	next.InactiveLast = nil
+	if !p.InactiveLast {
+		off := false
+		next.InactiveLast = &off
+	}
+
+	if next.View == h.View && next.ShowPreexisting == h.ShowPreexisting &&
+		next.Sort == h.Sort && next.Reverse == h.Reverse &&
+		samePtr(next.InactiveLast, h.InactiveLast) {
+		return
+	}
+	if next.IsZero() {
+		delete(s.hosts, host)
+	} else {
+		s.hosts[host] = next
+	}
+	s.dirty = true
+}
+
+func samePtr(a, b *bool) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return *a == *b
+	}
+}
 
 // document is the on-disk shape.
 type document struct {

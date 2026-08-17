@@ -51,12 +51,36 @@ func (s SortKey) Next() SortKey {
 	return SortRemote
 }
 
+// sortKeyNamed maps a persisted sort name back to a key.
+func sortKeyNamed(name string) SortKey {
+	for _, k := range sortKeys {
+		if k.String() == name {
+			return k
+		}
+	}
+	return SortRemote
+}
+
+// hidePreexisting drops services that were already running when autotun
+// connected and are not forwarded. They are the host's own furniture — sshd,
+// a database — and listing them by default buries the ports you started.
+func hidePreexisting(rows []tunnel.State) []tunnel.State {
+	out := rows[:0:0]
+	for _, r := range rows {
+		if r.Skip == tunnel.SkipPreexising && r.Status != tunnel.StatusActive {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // sortStates orders rows in place.
 //
 // Age and traffic default to descending (newest and busiest first) because that
 // is what you want to see without pressing anything; reverse flips whichever
 // direction the key considers natural.
-func sortStates(rows []tunnel.State, key SortKey, reverse bool) {
+func sortStates(rows []tunnel.State, key SortKey, reverse, inactiveLast bool) {
 	less := func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		switch key {
@@ -84,11 +108,24 @@ func sortStates(rows []tunnel.State, key SortKey, reverse bool) {
 		}
 		return a.RemotePort < b.RemotePort
 	}
+	ordered := less
 	if reverse {
-		sort.SliceStable(rows, func(i, j int) bool { return less(j, i) })
-		return
+		ordered = func(i, j int) bool { return less(j, i) }
 	}
-	sort.SliceStable(rows, less)
+	if inactiveLast {
+		// Grouping wraps the chosen order rather than replacing it: live
+		// tunnels stay together at the top, sorted among themselves.
+		inner := ordered
+		ordered = func(i, j int) bool {
+			ai := rows[i].Status == tunnel.StatusActive
+			bj := rows[j].Status == tunnel.StatusActive
+			if ai != bj {
+				return ai
+			}
+			return inner(i, j)
+		}
+	}
+	sort.SliceStable(rows, ordered)
 }
 
 // filterStates keeps rows matching a case-insensitive query against the port

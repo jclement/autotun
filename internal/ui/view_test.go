@@ -411,10 +411,13 @@ func TestViewSearchAndViewChips(t *testing.T) {
 		t.Errorf("an active search should be shown:\n%s", plainView(m))
 	}
 
-	send(m, "e")
-	m.hasToast = false // the toast owns the bottom border while it is up
-	if !strings.Contains(plainView(m), "view: everything") {
-		t.Errorf("the active view should be shown:\n%s", plainView(m))
+	// Listing pre-existing services is a mode worth showing in the footer.
+	stub.prefs = config.DefaultViewPrefs()
+	m2 := newModel(t, stub)
+	send(m2, "c", " ")
+	m2.menu.open = false
+	if !strings.Contains(plainView(m2), "+pre-existing") {
+		t.Errorf("the active view should be shown:\n%s", plainView(m2))
 	}
 }
 

@@ -125,11 +125,6 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 		}
 	}()
 
-	// A remembered view wins unless --existing was passed explicitly.
-	if !cfg.Existing && settings.View(host) == config.ViewEverything {
-		policy.Existing = true
-	}
-
 	var prog *tea.Program
 	mgr := tunnel.New(alloc, client, tunnel.Options{
 		Policy:        policy,
@@ -326,12 +321,13 @@ type uiController struct {
 	host     string
 }
 
-// SetPolicy records a view change so the host opens the same way next time.
-func (c *uiController) SetPolicy(p tunnel.Policy) {
-	view := config.ViewSinceStart
-	if p.Existing {
-		view = config.ViewEverything
-	}
-	c.settings.SetView(c.host, view)
-	c.Manager.SetPolicy(p)
+// ViewPrefs returns how this host's table was last presented.
+func (c *uiController) ViewPrefs() config.ViewPrefs {
+	return c.settings.ViewPrefs(c.host)
+}
+
+// SetViewPrefs remembers how this host's table is presented. These are display
+// choices only — none of them starts or stops a tunnel.
+func (c *uiController) SetViewPrefs(p config.ViewPrefs) {
+	c.settings.SetViewPrefs(c.host, p)
 }

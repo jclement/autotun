@@ -21,6 +21,7 @@ type stubController struct {
 	schemes  map[int]tunnel.Scheme
 	locals   map[int]int
 	localErr error
+	prefs    config.ViewPrefs
 }
 
 func newStub(rows ...tunnel.State) *stubController {
@@ -30,7 +31,22 @@ func newStub(rows ...tunnel.State) *stubController {
 		modes:   map[int]config.Mode{},
 		schemes: map[int]tunnel.Scheme{},
 		locals:  map[int]int{},
+		// Tests about layout and keys should see every row they construct;
+		// the default hiding of pre-existing services is covered on its own.
+		prefs: config.ViewPrefs{ShowPreexisting: true, InactiveLast: false, Sort: "port"},
 	}
+}
+
+func (s *stubController) ViewPrefs() config.ViewPrefs {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prefs
+}
+
+func (s *stubController) SetViewPrefs(p config.ViewPrefs) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prefs = p
 }
 
 func (s *stubController) CycleMode(port int) config.Mode {
@@ -520,20 +536,75 @@ func TestModelPauseTogglesPolicy(t *testing.T) {
 	}
 }
 
-func TestModelToggleView(t *testing.T) {
-	stub := newStub(skippedRow(5432, "postgres", tunnel.SkipPreexising))
+// The settings popup changes what is listed, never what is forwarded. A "view"
+// toggle that quietly opened tunnels is the surprise this replaced.
+func TestModelSettingsMenu(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
 	m := newModel(t, stub)
 
-	send(m, "e")
-	if !stub.Policy().Existing {
-		t.Error("e should switch to the everything view")
+	send(m, "c")
+	if !m.menu.open {
+		t.Fatal("c should open the settings popup")
 	}
-	if !strings.Contains(m.toast.Text, "everything") {
-		t.Errorf("toast = %q, should name the view", m.toast.Text)
+	view := plainView(m)
+	for _, want := range []string{"Settings", "show pre-existing", "inactive last", "sort by"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the popup is missing %q:\n%s", want, view)
+		}
 	}
-	send(m, "e")
-	if stub.Policy().Existing {
-		t.Error("e should toggle back")
+
+	// Toggling an option must not touch the forwarding policy.
+	policyBefore := stub.Policy().Existing
+	showBefore := stub.ViewPrefs().ShowPreexisting
+	send(m, " ")
+	if stub.ViewPrefs().ShowPreexisting == showBefore {
+		t.Error("space should toggle the highlighted option")
+	}
+	if stub.Policy().Existing != policyBefore {
+		t.Error("a settings change must never alter the forwarding policy")
+	}
+
+	inactiveBefore := stub.ViewPrefs().InactiveLast
+	send(m, "down", " ")
+	if stub.ViewPrefs().InactiveLast == inactiveBefore {
+		t.Error("the second option should have toggled")
+	}
+
+	// The sort row cycles rather than toggling.
+	send(m, "down", " ")
+	if m.sortKey == SortRemote {
+		t.Error("activating the sort row should move to the next choice")
+	}
+	if stub.ViewPrefs().Sort != m.sortKey.String() {
+		t.Errorf("the sort choice was not persisted: %q vs %q", stub.ViewPrefs().Sort, m.sortKey.String())
+	}
+
+	send(m, "esc")
+	if m.menu.open {
+		t.Error("esc should close the popup")
+	}
+}
+
+// Pre-existing services are hidden until asked for, so the ports you started
+// are not buried under the host's own furniture.
+func TestModelHidesPreexistingByDefault(t *testing.T) {
+	stub := newStub(
+		row(3000, 3000, "node"),
+		skippedRow(5432, "postgres", tunnel.SkipPreexising),
+	)
+	stub.prefs = config.DefaultViewPrefs()
+	m := newModel(t, stub)
+
+	if len(m.rows) != 1 || m.rows[0].RemotePort != 3000 {
+		t.Errorf("rows = %+v, want the pre-existing one hidden", ports(m.rows))
+	}
+
+	send(m, "c", " ") // show pre-existing
+	if len(m.rows) != 2 {
+		t.Errorf("rows = %v, want both once shown", ports(m.rows))
+	}
+	if !strings.Contains(plainView(m), "+pre-existing") {
+		t.Error("the footer should show that pre-existing services are listed")
 	}
 }
 

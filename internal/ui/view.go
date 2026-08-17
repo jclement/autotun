@@ -102,6 +102,8 @@ func (m *Model) View() string {
 		view = overlayCenter(view, m.helpBox(), m.width, m.height)
 	case m.showDetail:
 		view = overlayCenter(view, m.detailBox(), m.width, m.height)
+	case m.menu.open:
+		view = overlayCenter(view, m.menuBox(), m.width, m.height)
 	}
 	return m.pendingOSC + view
 }
@@ -272,8 +274,8 @@ func (m *Model) viewChip() string {
 	if m.query != "" {
 		parts = append(parts, t.Accent2Text.Render("/"+m.query))
 	}
-	if m.ctrl.Policy().Existing {
-		parts = append(parts, t.Meta.Render("view: everything"))
+	if m.prefs.ShowPreexisting {
+		parts = append(parts, t.Meta.Render("+pre-existing"))
 	}
 	return strings.Join(parts, t.Separator.Render(" · "))
 }
@@ -568,11 +570,11 @@ func (m *Model) editorLabel() string {
 func (m *Model) keyBar() string {
 	t := m.th
 
-	// Ordered by how much you would miss it.
+	// Deliberately short. Everything else is one keystroke away behind ?,
+	// and a key bar nobody can read is not a key bar.
 	keys := [][2]string{
-		{"↑↓", "move"}, {"esc", "quit"}, {"?", "help"}, {"enter", "detail"},
-		{"o", "open"}, {"a", "auto/on/off"}, {"t", "http/s"}, {"l", "local port"},
-		{"/", "search"}, {"y", "copy"}, {"e", "view"}, {"s", "sort"},
+		{"↑↓", "move"}, {"enter", "detail"}, {"o", "open"},
+		{"c", "config"}, {"?", "help"}, {"esc", "quit"},
 	}
 
 	// Reserve room for the right-hand chip plus the border decorations.
@@ -698,10 +700,10 @@ func (m *Model) helpBox() string {
 			{"a", "auto → on → off (remembered)"},
 			{"t", "http / https (remembered)"},
 			{"l", "set the local port (remembered)"},
-			{"y", "copy URL to clipboard"},
+			{"y", "copy the URL to your clipboard"},
 		}},
 		{"everything", [][2]string{
-			{"e", "view: since start / everything"},
+			{"c", "settings: what is listed and how"},
 			{"p", "pause automatic forwarding"},
 		}},
 		{"mouse", [][2]string{

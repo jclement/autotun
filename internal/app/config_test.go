@@ -211,9 +211,8 @@ func TestSleepCtxReturnsEarlyOnCancel(t *testing.T) {
 	}
 }
 
-// The UI adapter is what turns a view toggle into something remembered for the
-// host, so it is worth pinning down separately from the manager.
-func TestUIControllerPersistsTheView(t *testing.T) {
+// The UI adapter is what makes a settings change outlive the session.
+func TestUIControllerPersistsViewPrefs(t *testing.T) {
 	dir := t.TempDir()
 	settings := config.Open(filepath.Join(dir, config.FileName))
 
@@ -224,25 +223,24 @@ func TestUIControllerPersistsTheView(t *testing.T) {
 
 	c := &uiController{Manager: mgr, settings: settings, host: "devbox"}
 
-	p := c.Policy()
-	p.Existing = true
-	c.SetPolicy(p)
-	if got := settings.View("devbox"); got != config.ViewEverything {
-		t.Errorf("view = %q, want everything", got)
-	}
-	if !c.Policy().Existing {
-		t.Error("the policy change did not reach the manager")
+	if got := c.ViewPrefs(); got.ShowPreexisting || !got.InactiveLast {
+		t.Errorf("defaults = %+v, want pre-existing hidden and inactive last", got)
 	}
 
-	p.Existing = false
-	c.SetPolicy(p)
-	if got := settings.View("devbox"); got != config.ViewSinceStart {
-		t.Errorf("view = %q, want since-start", got)
+	c.SetViewPrefs(config.ViewPrefs{ShowPreexisting: true, Sort: "recent"})
+	if got := c.ViewPrefs(); !got.ShowPreexisting || got.Sort != "recent" {
+		t.Errorf("prefs = %+v, want them remembered", got)
+	}
+
+	// Settings are display-only: they must never start forwarding anything.
+	if c.Policy().Existing {
+		t.Error("a settings change altered the forwarding policy")
 	}
 }
 
-// A remembered view is applied at startup unless --existing was passed.
-func TestRememberedViewAppliesAtStartup(t *testing.T) {
+// Remembered settings are display-only: a host configured to list its
+// pre-existing services must still not forward them.
+func TestRememberedViewDoesNotForward(t *testing.T) {
 	isolatedEnv(t)
 
 	path, err := config.DefaultPath()
@@ -262,11 +260,16 @@ func TestRememberedViewAppliesAtStartup(t *testing.T) {
 		"@@AUTOTUN-END\n"
 
 	host, _, _ := net.SplitHostPort(remote.addr())
-	body := fmt.Sprintf("hosts:\n  %s:\n    view: everything\n", host)
+	body := fmt.Sprintf("hosts:\n  %s:\n    show_preexisting: true\n", host)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	out, _ := runApp(t, baseConfig(remote))
-	waitForOutput(t, out, "opened")
+	waitForOutput(t, out, "connected")
+	time.Sleep(700 * time.Millisecond)
+
+	if strings.Contains(out.String(), "opened") {
+		t.Errorf("listing pre-existing services must not forward them:\n%s", out.String())
+	}
 }

@@ -20,6 +20,10 @@ type Controller interface {
 	SetLocalPort(remotePort, local int) error
 	Policy() tunnel.Policy
 	SetPolicy(tunnel.Policy)
+	// ViewPrefs and SetViewPrefs carry the per-host presentation settings,
+	// which the controller persists.
+	ViewPrefs() config.ViewPrefs
+	SetViewPrefs(config.ViewPrefs)
 }
 
 // ConnState is the SSH link's status, shown in the header.
@@ -119,6 +123,8 @@ type Model struct {
 	showHelp   bool
 	showDetail bool
 	confirming bool
+	menu       viewMenu
+	prefs      config.ViewPrefs
 
 	status   StatusMsg
 	toast    ToastMsg
@@ -157,6 +163,7 @@ func New(ctrl Controller, opts Options) *Model {
 	if opts.OpenURL == nil {
 		opts.OpenURL = OpenURL
 	}
+	prefs := ctrl.ViewPrefs()
 	return &Model{
 		ctrl:    ctrl,
 		opts:    opts,
@@ -167,6 +174,9 @@ func New(ctrl Controller, opts Options) *Model {
 		width:   80,
 		height:  24,
 		status:  StatusMsg{State: Connecting},
+		prefs:   prefs,
+		sortKey: sortKeyNamed(prefs.Sort),
+		reverse: prefs.Reverse,
 		rows:    ctrl.States(),
 		// Nothing is highlighted until you move: a selection bar on arrival
 		// implies you already chose something.
@@ -282,6 +292,14 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		m.showDetail, m.showHelp = false, false
 		return nil
 	}
+	if m.menu.open {
+		if i := m.menuRowAt(msg.Y); i >= 0 {
+			m.menu.cursor = i
+			return m.activateMenuItem(i)
+		}
+		m.menu.open = false
+		return nil
+	}
 	// The quit confirmation is deliberately modal: it must be answered.
 	if m.confirming {
 		return nil
@@ -354,7 +372,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 
 // overlayOpen reports whether a modal layer is covering the table.
 func (m *Model) overlayOpen() bool {
-	return m.confirming || m.showHelp || m.showDetail || m.editing()
+	return m.confirming || m.showHelp || m.showDetail || m.editing() || m.menu.open
 }
 
 // isFooterRow reports whether y is the key bar.
@@ -383,8 +401,8 @@ func (m *Model) runAction(id string) tea.Cmd {
 		m.openFilter()
 	case "l":
 		return m.openLocalPort()
-	case "e":
-		return m.toggleView()
+	case "c":
+		m.menu.open = true
 	case "a":
 		return m.cycleMode()
 	case "y":
@@ -412,8 +430,11 @@ func (m *Model) rowAt(y int) int {
 func (m *Model) reload() {
 	selected := m.selectedPort()
 	rows := m.ctrl.States()
+	if !m.prefs.ShowPreexisting {
+		rows = hidePreexisting(rows)
+	}
 	rows = filterStates(rows, m.query)
-	sortStates(rows, m.sortKey, m.reverse)
+	sortStates(rows, m.sortKey, m.reverse, m.prefs.InactiveLast)
 	m.rows = rows
 
 	if selected > 0 {
@@ -519,6 +540,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	}
 	if m.editing() {
 		return m.handleEditorKey(msg)
+	}
+	if m.menu.open {
+		return m.handleMenuKey(msg)
 	}
 	if m.showHelp {
 		switch msg.String() {
@@ -664,10 +688,12 @@ func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
 
 	case "s":
 		m.sortKey = m.sortKey.Next()
+		m.savePrefs()
 		m.reload()
 		return m.showToast(ToastMsg{Text: "sort: " + m.sortKey.String()})
 	case "r":
 		m.reverse = !m.reverse
+		m.savePrefs()
 		m.reload()
 
 	case "/":
@@ -695,8 +721,8 @@ func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
 		return m.copySelected()
 	case "p":
 		return m.togglePause()
-	case "e":
-		return m.toggleView()
+	case "c":
+		m.menu.open = true
 	}
 	return nil
 }
@@ -771,19 +797,6 @@ func (m *Model) togglePause() tea.Cmd {
 		return m.showToast(ToastMsg{Text: "paused: new ports will not be forwarded"})
 	}
 	return m.showToast(ToastMsg{Text: "resumed"})
-}
-
-// toggleView switches between showing only what appeared since autotun
-// started and showing everything the host is listening on.
-func (m *Model) toggleView() tea.Cmd {
-	p := m.ctrl.Policy()
-	p.Existing = !p.Existing
-	m.ctrl.SetPolicy(p)
-	m.reload()
-	if p.Existing {
-		return m.showToast(ToastMsg{Text: "view: everything (remembered for this host)"})
-	}
-	return m.showToast(ToastMsg{Text: "view: since start (remembered for this host)"})
 }
 
 // beginQuit starts the dissolve, or quits immediately when it is disabled.

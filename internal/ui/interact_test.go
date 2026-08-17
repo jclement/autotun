@@ -460,17 +460,6 @@ func TestModelClickFooterActions(t *testing.T) {
 	m.reload()
 	footerY := m.height - 1
 
-	// Search
-	m.Update(clickAt(footerZoneX(t, m, "/"), footerY))
-	if m.editor != editorFilter {
-		t.Error("clicking / should open the search box")
-	}
-	// A click elsewhere commits it rather than editing blindly.
-	m.Update(clickAt(1, headerLines))
-	if m.editing() {
-		t.Error("clicking away should close the search box")
-	}
-
 	// Detail
 	m.Update(clickAt(1, headerLines)) // select a row
 	m.Update(clickAt(footerZoneX(t, m, "enter"), footerY))
@@ -490,15 +479,16 @@ func TestModelClickFooterActions(t *testing.T) {
 	}
 	m.Update(clickAt(1, headerLines))
 
-	// Mode
-	m.Update(clickAt(1, headerLines)) // select a row first
-	m.Update(clickAt(footerZoneX(t, m, "a"), footerY))
-	stub.mu.Lock()
-	mode := stub.modes[3000]
-	stub.mu.Unlock()
-	if mode != config.ModeOn {
-		t.Errorf("clicking a gave mode %q, want on", mode)
+	// Settings
+	m.Update(clickAt(footerZoneX(t, m, "c"), footerY))
+	if !m.menu.open {
+		t.Error("clicking c should open the settings popup")
 	}
+	m.Update(clickAt(1, 0)) // a click outside closes it
+	if m.menu.open {
+		t.Error("clicking outside should close the settings popup")
+	}
+	_ = stub
 
 	// Quit asks for confirmation rather than exiting on a stray click.
 	m.Update(clickAt(footerZoneX(t, m, "esc"), footerY))
@@ -510,14 +500,29 @@ func TestModelClickFooterActions(t *testing.T) {
 	}
 }
 
-func TestModelClickSortFooterCycles(t *testing.T) {
-	m := newModel(t, newStub(row(3000, 3000, "node")))
-	m.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
-	m.reload()
-	before := m.sortKey
-	m.Update(clickAt(footerZoneX(t, m, "s"), m.height-1))
-	if m.sortKey == before {
-		t.Error("clicking s should cycle the sort")
+// The settings popup's rows are clickable too.
+func TestModelClickSettingsRow(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
+	m := newModel(t, stub)
+	send(m, "c")
+
+	// The first row is "show pre-existing".
+	_ = m.View() // the popup must have rendered for its rows to be locatable
+	y := -1
+	for candidate := 0; candidate < m.height; candidate++ {
+		if m.menuRowAt(candidate) == 0 {
+			y = candidate
+			break
+		}
+	}
+	if y < 0 {
+		t.Fatal("could not locate the first settings row")
+	}
+
+	before := stub.ViewPrefs().ShowPreexisting
+	m.Update(clickAt(10, y))
+	if stub.ViewPrefs().ShowPreexisting == before {
+		t.Error("clicking a settings row should change it")
 	}
 }
 

@@ -53,7 +53,7 @@ tunnel dies. You go back to writing code, which is the thing you were ostensibly
 │     8080  ←     8080     unknown  python3 -m http.se…    4m       1    18 KB  │
 │        —        5432  -  unknown  postgres                          never fwd │
 │                                                                               │
-╰─ ↑↓ move · esc quit · ? help · enter detail · o open · a auto/on/off ─────────╯
+╰─ ↑↓ move · enter detail · o open · c config · ? help · esc quit ──────────────╯
 ```
 
 `●` means traffic is flowing through it *right now*. `◦` means it just showed up. When you
@@ -113,9 +113,15 @@ force each fallback. Because "it probably still works on busybox" is not a test.
 **It ignores your existing ports on purpose.** Your dev box is already listening on sshd,
 systemd-resolved, postgres, redis, and whatever `docker-proxy` is doing. Scooping all that up
 would give you a table full of noise and a fistful of port collisions on your laptop. So
-autotun snapshots what's listening the moment it connects and marks it *pre-existing*: shown,
-dimmed, not forwarded. Want one anyway? Highlight it and press `a`. Want all of them? Pass
+autotun snapshots what's listening the moment it connects and marks it *pre-existing*: not
+forwarded, and not even listed unless you ask. Want to see them? `c`, then toggle *show
+pre-existing*. Want one forwarded? Highlight it and press `a`. Want all of them? Pass
 `--existing` and enjoy your postgres on localhost.
+
+**Settings never forward anything.** The `c` popup changes what you look at — which rows are
+listed, how they're sorted, whether idle rows sink to the bottom. It will never open or close
+a tunnel behind your back. Forwarding is `a` per port, or `--existing` for the lot. Those are
+two different questions and conflating them is how you end up with tunnels you didn't ask for.
 
 Anything ruled out by a *flag* — below `--min-port`, in `--exclude`, outside `--include` —
 doesn't appear at all. You already decided about those; listing sshd on 22 just to tell you it
@@ -153,8 +159,8 @@ someone else's stderr and hoping.
 | `a` | auto → always on → never — **remembered** |
 | `t` | set http / https — **remembered** |
 | `l` | pin the local port — **remembered** |
-| `y` | copy the URL |
-| `e` | view: since start / everything — **remembered per host** |
+| `y` | copy the URL to your clipboard |
+| `c` | settings popup — what is listed and how, **remembered per host** |
 | `p` | pause automatic forwarding |
 | `s` / `r` | cycle sort / reverse |
 | `/` | search by port or process |
@@ -170,7 +176,8 @@ And the whole thing is clickable, because it's 2026 and you have a mouse:
 | click the `M` cell | cycle auto → on → off |
 | click the `VIA` cell | cycle unknown → http → https |
 | click a column header | sort by it; click again to reverse |
-| click anything in the key bar | run that action — every feature is discoverable without memorizing a key |
+| click anything in the key bar | run that action |
+| click a row in the `c` popup | change that setting |
 | wheel | scroll |
 
 `y` copies via OSC 52, which means the URL lands in your *actual* clipboard even through

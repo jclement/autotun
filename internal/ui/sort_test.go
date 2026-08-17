@@ -63,7 +63,7 @@ func TestSortStates(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.key.String(), func(t *testing.T) {
 			rows := sortFixture()
-			sortStates(rows, tt.key, false)
+			sortStates(rows, tt.key, false, false)
 			if got := ports(rows); !equal(got, tt.want) {
 				t.Errorf("sort by %s = %v, want %v", tt.key, got, tt.want)
 			}
@@ -73,7 +73,7 @@ func TestSortStates(t *testing.T) {
 
 func TestSortStatesReversed(t *testing.T) {
 	rows := sortFixture()
-	sortStates(rows, SortRemote, true)
+	sortStates(rows, SortRemote, true, false)
 	if got := ports(rows); !equal(got, []int{8080, 5000, 3000}) {
 		t.Errorf("reversed remote sort = %v", got)
 	}
@@ -90,7 +90,7 @@ func TestSortStatesIsStableOnTies(t *testing.T) {
 	}
 	for _, key := range sortKeys {
 		got := append([]tunnel.State(nil), rows...)
-		sortStates(got, key, false)
+		sortStates(got, key, false, false)
 		if p := ports(got); !equal(p, []int{3000, 5000, 9000}) {
 			t.Errorf("sort by %s broke the tie-break order: %v", key, p)
 		}
@@ -156,5 +156,55 @@ func TestFilterStatesDoesNotAliasTheInput(t *testing.T) {
 	}
 	if rows[0].RemotePort != 3000 || rows[1].RemotePort != 8080 {
 		t.Errorf("the input slice was modified: %v", ports(rows))
+	}
+}
+
+// Inactive rows sink below live ones without disturbing the order within each
+// group, so the tunnels you are using stay together at the top.
+func TestSortInactiveLast(t *testing.T) {
+	live := row(9000, 9000, "live")
+	idle := skippedRow(3000, "idle", tunnel.SkipPreexising)
+	live2 := row(5000, 5000, "live2")
+
+	rows := []tunnel.State{idle, live, live2}
+	sortStates(rows, SortRemote, false, true)
+
+	if got := ports(rows); !equal(got, []int{5000, 9000, 3000}) {
+		t.Errorf("order = %v, want the live rows first, still sorted by port", got)
+	}
+
+	// With grouping off it is a plain port sort.
+	rows = []tunnel.State{idle, live, live2}
+	sortStates(rows, SortRemote, false, false)
+	if got := ports(rows); !equal(got, []int{3000, 5000, 9000}) {
+		t.Errorf("order = %v, want a plain port sort", got)
+	}
+}
+
+// Pre-existing services are the host's own furniture; they are hidden unless
+// asked for, and a forwarded one is never hidden.
+func TestHidePreexisting(t *testing.T) {
+	forwarded := row(3000, 3000, "node")
+	forwarded.Skip = tunnel.SkipPreexising // attached by hand, so still active
+
+	rows := []tunnel.State{
+		row(8080, 8080, "vite"),
+		skippedRow(5432, "postgres", tunnel.SkipPreexising),
+		forwarded,
+	}
+	got := ports(hidePreexisting(rows))
+	if !equal(got, []int{8080, 3000}) {
+		t.Errorf("visible ports = %v, want the idle pre-existing one hidden", got)
+	}
+}
+
+func TestSortKeyNamed(t *testing.T) {
+	for _, k := range sortKeys {
+		if got := sortKeyNamed(k.String()); got != k {
+			t.Errorf("sortKeyNamed(%q) = %q, want %q", k.String(), got, k)
+		}
+	}
+	if got := sortKeyNamed("nonsense"); got != SortRemote {
+		t.Errorf("an unknown name = %q, want the default", got)
 	}
 }

@@ -112,9 +112,11 @@ func TestViewEmptyStates(t *testing.T) {
 		t.Errorf("connected-but-empty should explain itself:\n%s", plainView(m))
 	}
 
-	m.Update(StatusMsg{State: Reconnecting})
-	if !strings.Contains(plainView(m), "waiting for the connection") {
-		t.Errorf("disconnected-and-empty should explain itself:\n%s", plainView(m))
+	// Before the first connection there is no outage to report, just a wait.
+	fresh := newModel(t, newStub())
+	fresh.Update(StatusMsg{State: Connecting})
+	if !strings.Contains(plainView(fresh), "waiting for the connection") {
+		t.Errorf("connecting-and-empty should explain itself:\n%s", plainView(fresh))
 	}
 
 	m2 := newModel(t, newStub(row(3000, 3000, "node")))
@@ -501,4 +503,60 @@ func TestViewSkipReasonStartsAtTheAgeColumn(t *testing.T) {
 		return
 	}
 	t.Error("the reason was not rendered")
+}
+
+// Losing the link takes over the screen: on a laptop the connection dropping is
+// the thing you need to know about, not a chip in the corner.
+func TestViewReconnectScreen(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "node")))
+
+	// Nothing has connected yet, so there is no outage to announce.
+	m.Update(StatusMsg{State: Disconnected, Detail: "connection refused"})
+	if m.offline() {
+		t.Error("a failure before the first connection is not an outage")
+	}
+
+	m.Update(StatusMsg{State: Connected, Mode: "ss"})
+	m.Update(StatusMsg{
+		State:     Disconnected,
+		Detail:    "connection lost: read tcp: connection reset",
+		Attempt:   3,
+		NextRetry: testNow.Add(4 * time.Second),
+	})
+	if !m.offline() {
+		t.Fatal("a drop after connecting should show the reconnect screen")
+	}
+
+	view := plainView(m)
+	for _, want := range []string{"Connection lost", "connection reset", "Holding 1 tunnel", "Next attempt in 4s", "attempt 3", "r try now"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the reconnect screen is missing %q:\n%s", want, view)
+		}
+	}
+
+	// And it says the ports are kept, which is the reassuring part.
+	if !strings.Contains(view, "same numbers") {
+		t.Errorf("the screen should say the local ports are held:\n%s", view)
+	}
+
+	m.Update(StatusMsg{State: Reconnecting, Attempt: 4})
+	if !strings.Contains(plainView(m), "Reconnecting to devbox") {
+		t.Errorf("an in-flight attempt should say so:\n%s", plainView(m))
+	}
+
+	m.Update(StatusMsg{State: Connected, Mode: "ss"})
+	if m.offline() {
+		t.Error("reconnecting should dismiss the screen")
+	}
+}
+
+// The countdown never runs backwards past zero.
+func TestViewReconnectCountdownFloorsAtZero(t *testing.T) {
+	m := newModel(t, newStub())
+	m.Update(StatusMsg{State: Connected})
+	m.Update(StatusMsg{State: Disconnected, NextRetry: testNow.Add(-5 * time.Second)})
+
+	if !strings.Contains(plainView(m), "Next attempt in 0s") {
+		t.Errorf("an elapsed countdown should read zero:\n%s", plainView(m))
+	}
 }

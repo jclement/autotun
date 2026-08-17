@@ -104,6 +104,8 @@ func (m *Model) View() string {
 		view = overlayCenter(view, m.detailBox(), m.width, m.height)
 	case m.menu.open:
 		view = overlayCenter(view, m.menuBox(), m.width, m.height)
+	case m.offline():
+		view = overlayCenter(view, m.reconnectBox(), m.width, m.height)
 	}
 	return m.pendingOSC + view
 }
@@ -617,6 +619,79 @@ type zone struct {
 
 // contains reports whether x falls inside the zone.
 func (z zone) contains(x int) bool { return x >= z.x0 && x < z.x1 }
+
+// offline reports whether the link has gone away since we were connected.
+// The first connection happens before the UI starts, so a drop after that is
+// an outage worth taking over the screen for.
+func (m *Model) offline() bool {
+	if !m.everConnected {
+		return false
+	}
+	return m.status.State == Disconnected || m.status.State == Reconnecting
+}
+
+// reconnectBox is the waiting screen shown while the link is down.
+//
+// It says what is being kept, not just what is broken: the tunnels are still
+// held, their local ports are still reserved, and they come back on the same
+// numbers — so the browser tab you left open keeps working.
+func (m *Model) reconnectBox() string {
+	t := m.th
+
+	held := 0
+	for _, r := range m.rows {
+		if r.Status == tunnel.StatusOffline || r.Status == tunnel.StatusActive {
+			held++
+		}
+	}
+
+	var b strings.Builder
+	if m.status.State == Reconnecting {
+		b.WriteString(t.Warning.Render("◐  Reconnecting to " + m.opts.Host))
+	} else {
+		b.WriteString(t.Bad.Render("○  Connection lost"))
+	}
+	b.WriteString("\n\n")
+
+	if detail := strings.TrimSpace(m.status.Detail); detail != "" {
+		b.WriteString(t.Meta.Render(firstLine(detail)) + "\n\n")
+	}
+
+	if held > 0 {
+		b.WriteString(t.Value.Render(fmt.Sprintf("Holding %d tunnel%s.", held, plural(held))) + "\n")
+		b.WriteString(t.Faintest.Render("Their local ports stay reserved and come back on the same numbers.") + "\n\n")
+	}
+
+	switch {
+	case m.status.State == Reconnecting:
+		b.WriteString(t.Meta.Render("Trying now…"))
+	case !m.status.NextRetry.IsZero():
+		wait := m.status.NextRetry.Sub(m.now())
+		if wait < 0 {
+			wait = 0
+		}
+		b.WriteString(t.Meta.Render(fmt.Sprintf("Next attempt in %ds", int(wait.Seconds()+0.5))))
+	default:
+		b.WriteString(t.Meta.Render("Waiting…"))
+	}
+	if m.status.Attempt > 1 {
+		b.WriteString(t.Faintest.Render(fmt.Sprintf("   (attempt %d)", m.status.Attempt)))
+	}
+
+	b.WriteString("\n\n")
+	b.WriteString(t.Key.Render("r") + t.KeyDesc.Render(" try now") + t.Faintest.Render("   ·   ") +
+		t.Key.Render("esc") + t.KeyDesc.Render(" quit"))
+
+	return t.Box.Render(b.String())
+}
+
+// firstLine keeps a multi-line error readable inside the box.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
 
 func (m *Model) confirmBox() string {
 	t := m.th

@@ -46,6 +46,9 @@ type StatusMsg struct {
 	Mode    string // remote discovery mode, e.g. "ss"
 	Detail  string // error text or reconnect reason
 	Attempt int
+	// NextRetry is when the next attempt is due, so the wait can be counted
+	// down rather than left to look like a hang.
+	NextRetry time.Time
 }
 
 // ToastMsg shows a transient message in the footer.
@@ -83,6 +86,8 @@ type Options struct {
 	Rand *rand.Rand
 	// OpenURL is called for the `o` key. Nil uses the platform opener.
 	OpenURL func(string) error
+	// Retry asks the supervisor to reconnect immediately.
+	Retry func()
 }
 
 // editorKind names the inline text entry currently open.
@@ -126,10 +131,13 @@ type Model struct {
 	menu       viewMenu
 	prefs      config.ViewPrefs
 
-	status   StatusMsg
-	toast    ToastMsg
-	toastID  int
-	hasToast bool
+	status StatusMsg
+	// everConnected gates the reconnect screen: the first connection happens
+	// before the UI starts, so anything after it going down is an outage.
+	everConnected bool
+	toast         ToastMsg
+	toastID       int
+	hasToast      bool
 
 	lastClickPort int
 	lastClickAt   time.Time
@@ -216,6 +224,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StatusMsg:
 		m.status = msg
+		if msg.State == Connected || msg.State == Probing {
+			m.everConnected = true
+		}
 		return m, nil
 
 	case ToastMsg:
@@ -544,6 +555,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.menu.open {
 		return m.handleMenuKey(msg)
 	}
+	if m.offline() {
+		if cmd, handled := m.handleOfflineKey(msg); handled {
+			return cmd
+		}
+	}
 	if m.showHelp {
 		switch msg.String() {
 		case "?", "esc", "q", "enter":
@@ -559,6 +575,20 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 	return m.handleTableKey(msg)
+}
+
+// handleOfflineKey handles the reconnect screen. Only the keys it owns are
+// claimed; quitting and the rest of the table still work behind it.
+func (m *Model) handleOfflineKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+	if msg.String() != "r" {
+		return nil, false
+	}
+	if m.opts.Retry == nil {
+		return nil, true
+	}
+	m.opts.Retry()
+	m.status.NextRetry = time.Time{}
+	return m.showToast(ToastMsg{Text: "reconnecting…"}), true
 }
 
 func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {

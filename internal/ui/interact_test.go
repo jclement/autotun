@@ -553,3 +553,47 @@ func TestModelWheelIgnoredUnderOverlays(t *testing.T) {
 		t.Error("the wheel should not scroll the table under an overlay")
 	}
 }
+
+// `r` on the reconnect screen cuts the backoff short, which is what you press
+// after opening the laptop rather than waiting out a timer set before it slept.
+func TestModelRetryNow(t *testing.T) {
+	var retries int
+	stub := newStub(row(3000, 3000, "node"))
+	m := New(stub, Options{
+		Host: "devbox", Now: func() time.Time { return testNow },
+		Retry: func() { retries++ },
+	})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.reload()
+
+	// While connected, r is still the sort-reverse key.
+	m.Update(StatusMsg{State: Connected})
+	send(m, "r")
+	if retries != 0 {
+		t.Error("r should not reconnect while the link is up")
+	}
+	if !m.reverse {
+		t.Error("r should still reverse the sort while connected")
+	}
+
+	m.Update(StatusMsg{State: Disconnected, NextRetry: testNow.Add(20 * time.Second)})
+	send(m, "r")
+	if retries != 1 {
+		t.Errorf("r asked for %d retries, want 1", retries)
+	}
+	if !m.status.NextRetry.IsZero() {
+		t.Error("asking to retry should clear the countdown")
+	}
+}
+
+// Quitting still works from the reconnect screen.
+func TestModelQuitWhileOffline(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "node")))
+	m.Update(StatusMsg{State: Connected})
+	m.Update(StatusMsg{State: Disconnected})
+
+	send(m, "esc")
+	if !m.confirming {
+		t.Error("esc should still offer to quit while offline")
+	}
+}

@@ -406,7 +406,9 @@ func (m *Manager) stateLocked(e *entry) State {
 		}
 	case e.err != "":
 		st.Status = StatusError
-	case m.dialer == nil && e.mode == config.ModeOn:
+	case m.dialer == nil && m.wantLocked(e).forward:
+		// The link is down but the port is still ours: the local port stays
+		// reserved and comes back on the same number.
 		st.Status = StatusOffline
 	default:
 		st.Status = StatusSkipped

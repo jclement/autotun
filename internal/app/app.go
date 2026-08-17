@@ -46,7 +46,9 @@ func StdIO() IO {
 const (
 	backoffStart = 1 * time.Second
 	backoffMax   = 30 * time.Second
-	keepAlive    = 20 * time.Second
+	// keepAlive doubles as the per-probe timeout, so an outage is noticed in
+	// roughly keepAlive × keepaliveMisses rather than whenever TCP gives up.
+	keepAlive = 8 * time.Second
 )
 
 // Run executes autotun. It returns nil on a clean exit.
@@ -143,6 +145,7 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 		mgr:      mgr,
 		renderer: renderer,
 		client:   client,
+		retry:    make(chan struct{}, 1),
 		status: func(msg ui.StatusMsg) {
 			if prog != nil {
 				prog.Send(msg)
@@ -161,6 +164,7 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 		Host:     host,
 		Version:  buildinfo.Version(),
 		Dissolve: !cfg.NoDissolve,
+		Retry:    sup.retryNow,
 	})
 	prog = tea.NewProgram(model,
 		tea.WithAltScreen(),
@@ -212,10 +216,22 @@ type supervisor struct {
 	renderer Renderer
 	status   func(ui.StatusMsg)
 
+	// retry lets the UI cut short the wait before the next attempt. Buffered,
+	// so asking twice while already retrying is harmless.
+	retry chan struct{}
+
 	// mu guards client, which the supervisor's own goroutine replaces while
 	// the UI goroutine may be shutting it down.
 	mu     sync.Mutex
 	client *sshx.Client
+}
+
+// retryNow asks the supervisor to stop waiting and try again immediately.
+func (s *supervisor) retryNow() {
+	select {
+	case s.retry <- struct{}{}:
+	default:
+	}
 }
 
 // currentClient returns the live connection, if there is one.
@@ -255,8 +271,13 @@ func (s *supervisor) run(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return nil
 				}
-				s.report(ui.StatusMsg{State: ui.Disconnected, Attempt: attempt, Detail: err.Error()})
-				if !sleepCtx(ctx, backoff) {
+				s.report(ui.StatusMsg{
+					State:     ui.Disconnected,
+					Attempt:   attempt,
+					Detail:    err.Error(),
+					NextRetry: time.Now().Add(backoff),
+				})
+				if !s.wait(ctx, backoff) {
 					return nil
 				}
 				backoff = nextBackoff(backoff)
@@ -296,8 +317,12 @@ func (s *supervisor) run(ctx context.Context) error {
 		// A prober that fails immediately every time is a configuration
 		// problem, not a flaky link — surface it rather than looping in
 		// silence.
-		s.report(ui.StatusMsg{State: ui.Disconnected, Detail: detail})
-		if !sleepCtx(ctx, backoff) {
+		s.report(ui.StatusMsg{
+			State:     ui.Disconnected,
+			Detail:    detail,
+			NextRetry: time.Now().Add(backoff),
+		})
+		if !s.wait(ctx, backoff) {
 			return nil
 		}
 		backoff = nextBackoff(backoff)
@@ -324,6 +349,23 @@ func nextBackoff(d time.Duration) time.Duration {
 		return backoffMax
 	}
 	return d
+}
+
+// wait pauses before the next attempt, returning false if the app is shutting
+// down. A retry request cuts the wait short: after closing a laptop lid there
+// is no reason to sit through a backoff that was measured against an outage
+// which has already ended.
+func (s *supervisor) wait(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-s.retry:
+		return true
+	case <-t.C:
+		return true
+	}
 }
 
 // sleepCtx waits for d, reporting false if ctx ended first.

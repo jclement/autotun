@@ -180,6 +180,11 @@ func (c *Client) watch() {
 	})
 }
 
+// keepaliveMisses is how many unanswered probes end the connection. Two is
+// enough to ride out a single lost packet without waiting a minute to notice a
+// link that is genuinely gone.
+const keepaliveMisses = 2
+
 // keepalive sends periodic global requests so a silently dropped link is
 // noticed rather than hanging until a TCP timeout hours later.
 func (c *Client) keepalive(every time.Duration) {
@@ -193,16 +198,43 @@ func (c *Client) keepalive(every time.Duration) {
 		case <-c.wait:
 			return
 		case <-t.C:
-			_, _, err := c.ssh.SendRequest("keepalive@openssh.com", true, nil)
-			if err == nil {
+			if c.ping(every) {
 				misses = 0
 				continue
 			}
-			if misses++; misses >= 3 {
+			if misses++; misses >= keepaliveMisses {
 				c.Close()
 				return
 			}
 		}
+	}
+}
+
+// ping sends one keepalive and reports whether it was answered in time.
+//
+// The timeout is the point. SendRequest blocks until a reply or until the
+// transport dies, and a link that vanished without a FIN — a closed laptop
+// lid, a wifi handover, a NAT that forgot — produces neither. Waiting on it
+// means noticing the outage minutes later, when TCP finally gives up.
+func (c *Client) ping(timeout time.Duration) bool {
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.ssh.SendRequest("keepalive@openssh.com", true, nil)
+		done <- err
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		return err == nil
+	case <-timer.C:
+		return false
+	case <-c.wait:
+		return false
+	case <-c.closed:
+		return false
 	}
 }
 

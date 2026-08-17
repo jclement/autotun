@@ -4,7 +4,9 @@ package e2e
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -198,11 +200,78 @@ func TestReconnectsAfterTheLinkDrops(t *testing.T) {
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if portAnswers(local) {
+			// And the restored tunnel must actually carry traffic again.
+			if got := getPort(t, local); got != "autotun-devserver port=3000" {
+				t.Errorf("the restored tunnel reached %q", got)
+			}
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("the tunnel never came back on local port %d. events:\n%s", local, s.diagnostics())
+}
+
+// A link that vanishes without closing — a closed lid, a wifi handover — is the
+// case a laptop actually hits. Dropping the packets rather than the connection
+// means nothing tells autotun anything; only the keepalive timeout does.
+func TestReconnectsAfterTheLinkIsBlackholed(t *testing.T) {
+	t.Parallel()
+	remote := startRemote(t, "")
+	s := run(t, remote)
+
+	local := s.awaitOpen(t, 3000)
+	if !portAnswers(local) {
+		t.Fatal("the tunnel never came up")
+	}
+
+	// Freezing the container leaves the TCP connection established while the
+	// far end stops answering — the same shape as a sleeping laptop or a wifi
+	// handover, and the case only a keepalive timeout can catch. Detaching the
+	// container from its network instead would take the published port with
+	// it, leaving nothing to reconnect to.
+	if out, err := execCombined("docker", "pause", remote.name); err != nil {
+		t.Skipf("cannot pause the container: %v\n%s", err, out)
+	}
+	unpaused := false
+	defer func() {
+		if !unpaused {
+			_, _ = execCombined("docker", "unpause", remote.name)
+		}
+	}()
+
+	s.awaitStatus(t, "disconnected")
+	t.Log("outage noticed while the connection was still established")
+
+	if out, err := execCombined("docker", "unpause", remote.name); err != nil {
+		t.Fatalf("unpausing the container: %v\n%s", out, err)
+	}
+	unpaused = true
+
+	// The container keeps its published port, so autotun should find its way
+	// back and restore the same local port.
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		if portAnswers(local) && getPortQuiet(local) == "autotun-devserver port=3000" {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("the tunnel never came back after the blackout. events:\n%s", s.diagnostics())
+}
+
+// getPortQuiet fetches a tunnel without failing the test when it is not ready.
+func getPortQuiet(port int) string {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(body))
 }
 
 func TestPlainOutputIsHumanReadable(t *testing.T) {

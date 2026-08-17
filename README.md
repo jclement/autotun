@@ -133,9 +133,33 @@ a very deliberate `≠` in the table. A silent remap is how you spend twenty min
 the wrong service and start questioning your career. `--same-port` turns a collision into a
 loud error instead, if you'd rather it just fail.
 
-**It survives your VPN.** Link drops, autotun reconnects with backoff and hands every service
-back the *same local port it had before*. Your browser tab keeps working. Your `curl` in a
-loop keeps working. You possibly don't even notice, which is the goal.
+**It survives your laptop.** Close the lid, walk between wifi APs, drop off the VPN — the
+connection goes away without telling anyone, which is the awkward case: nothing is closed, the
+packets just stop. autotun probes the link every 8 seconds with a *timeout*, so an outage is
+noticed in about 16 seconds rather than whenever TCP eventually gives up.
+
+Then it takes over the screen and tells you what it's doing:
+
+```
+╭───────────────────────────────────────────────────────────────╮
+│  ○  Connection lost                                           │
+│                                                               │
+│  connection lost: read tcp 10.0.0.4:52233->10.0.0.9:22: reset │
+│                                                               │
+│  Holding 2 tunnels.                                           │
+│  Their local ports stay reserved and come back on the same     │
+│  numbers.                                                     │
+│                                                               │
+│  Next attempt in 7s   (attempt 3)                             │
+│                                                               │
+│  r try now   ·   esc quit                                     │
+╰───────────────────────────────────────────────────────────────╯
+```
+
+The tunnels are *held*, not torn down: their local ports stay reserved and come back on the
+same numbers, so the browser tab you left open keeps working. Reconnection backs off from 1 to
+30 seconds, and `r` cuts the wait short — which is what you press after opening the lid,
+rather than sitting through a timer that was set before it slept.
 
 **It never sends your services anything they didn't ask for.** autotun does not probe. It
 doesn't open a speculative connection, doesn't fire a `GET /`, and doesn't offer a TLS

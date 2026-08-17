@@ -64,10 +64,9 @@ func TestSchemeURLScheme(t *testing.T) {
 }
 
 func TestSchemeLabel(t *testing.T) {
-	// Unknown reads as the guess it is, not a bare dash: opening the row will
-	// try HTTP, and the label should say so.
-	if got := SchemeUnknown.Label(); got != "http?" {
-		t.Errorf("unknown label = %q, want http?", got)
+	// Plain words, not punctuation the reader has to decode.
+	if got := SchemeUnknown.Label(); got != "unknown" {
+		t.Errorf("unknown label = %q, want unknown", got)
 	}
 	if got := SchemeHTTPS.Label(); got != "https" {
 		t.Errorf("https label = %q", got)

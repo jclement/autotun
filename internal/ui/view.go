@@ -18,7 +18,7 @@ const (
 	wLocal  = 7
 	wArrow  = 1
 	wRemote = 7
-	wScheme = 5
+	wScheme = 7 // fits "unknown"
 	wAge    = 5
 	wConns  = 6
 	wBytes  = 8

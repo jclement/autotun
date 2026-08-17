@@ -180,10 +180,8 @@ func TestViewSchemeColumn(t *testing.T) {
 	if !strings.Contains(view, "https") {
 		t.Error("a detected https port should be labeled")
 	}
-	// An unconfirmed scheme says what opening will actually try, rather than
-	// showing a dash that tells the reader nothing.
-	if !strings.Contains(view, "http?") {
-		t.Errorf("an unknown scheme should render as http?:\n%s", view)
+	if !strings.Contains(view, "unknown") {
+		t.Errorf("an undetermined scheme should say so plainly:\n%s", view)
 	}
 }
 
@@ -191,7 +189,7 @@ func TestViewSchemeColumn(t *testing.T) {
 // column is never a block of blanks.
 func TestViewSchemeShownOnSkippedRows(t *testing.T) {
 	m := newModel(t, newStub(skippedRow(5432, "postgres", tunnel.SkipPreexising)))
-	if !strings.Contains(plainView(m), "http?") {
+	if !strings.Contains(plainView(m), "unknown") {
 		t.Errorf("a skipped row should still show its protocol:\n%s", plainView(m))
 	}
 }

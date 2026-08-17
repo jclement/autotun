@@ -47,11 +47,11 @@ tunnel dies. You go back to writing code, which is the thing you were ostensibly
 ```
  autotun ▸ devbox                       ● connected (ss) · 3 tunnels · 1 idle · 00:14:22
 
-    LOCAL     ↓REMOTE  VIA    PROCESS                     AGE   CONNS        IN       OUT
-●    3000  ←     3000  http   node vite                   14m       2    1.2 MB    340 KB
-◦    5173  ≠     5173  https  node vite --host             9m       0       0 B       0 B
-     8080  ←     8080  http?  python3 -m http.server       4m       1     18 KB     92 KB
-        —        5432  http?  postgres                                     pre-existing
+    LOCAL     ↓REMOTE  VIA      PROCESS                   AGE   CONNS        IN       OUT
+●    3000  ←     3000  http     node vite                 14m       2    1.2 MB    340 KB
+◦    5173  ≠     5173  https    node vite --host           9m       0       0 B       0 B
+     8080  ←     8080  unknown  python3 -m http.server     4m       1     18 KB     92 KB
+        —        5432  unknown  postgres                                   pre-existing
 
  ↑↓ move · esc quit · ? help · enter detail · o open · t http/s · / filter · a attach
 ```
@@ -130,9 +130,9 @@ loop keeps working. You possibly don't even notice, which is the goal.
 **It doesn't poke your services.** autotun figures out which ports speak HTTPS by offering a
 TLS handshake — that's it. It will never fire a speculative `GET /` at an unidentified port,
 because "what happens if you send HTTP to the production-shaped database on 5432" is a
-question best left unanswered. Anything it can't identify shows as `http?` — meaning "opening
-this will try HTTP, and nobody has confirmed that" — until you press `t` or click the cell,
-after which it remembers your answer for that host and port forever.
+question best left unanswered. Anything it can't identify says `unknown` and opens as HTTP,
+until you press `t` or click the cell — after which it remembers your answer for that host and
+port forever.
 
 **It's a real SSH client, not a wrapper.** `golang.org/x/crypto/ssh`, one `direct-tcpip`
 channel per connection. It never shells out to `ssh -L`. That's what makes the live byte
@@ -217,8 +217,8 @@ Everything is a [mise](https://mise.jdx.dev) task, because remembering build com
 tax on the living:
 
 ```sh
-mise run dev              # build, install as autotun-dev, boot a throwaway Docker dev box, tunnel it
-mise run dev -- devbox    # ...or point it at a real host
+mise run dev              # build, boot a throwaway Docker dev box, and tunnel it
+mise run dev -- devbox    # ...or point this build at a real host
 mise run test             # unit + integration tests, race detector on
 mise run e2e              # the Docker-backed end-to-end suite
 mise run check            # everything CI runs
@@ -227,7 +227,8 @@ mise run release          # bump, tag, push
 
 `mise run dev` with no arguments builds the client, spins up a container running sshd plus dev
 servers that appear on a 5- and 10-second delay, and tunnels it — so you can watch tunnels
-arrive without involving a real machine or a real network. It authorizes the keys already in
+arrive without involving a real machine or a real network. The box is recreated each run, so
+its services are genuinely new rather than pre-existing. It authorizes the keys already in
 your agent and `~/.ssh`, so it behaves exactly like a real host. `mise run dev:shell` gets you
 a shell in there; `mise run dev:stop` puts it out of its misery.
 

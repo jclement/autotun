@@ -51,12 +51,11 @@ func (s Scheme) URLScheme() string {
 	return "http"
 }
 
-// Label renders the scheme for the table. Unknown is shown as the guess it
-// actually is — opening the row will try HTTP — rather than as a bare dash
-// that tells the reader nothing.
+// Label renders the scheme for the table: plainly "unknown", "http" or
+// "https", rather than punctuation the reader has to decode.
 func (s Scheme) Label() string {
 	if s == SchemeUnknown {
-		return "http?"
+		return "unknown"
 	}
 	return string(s)
 }

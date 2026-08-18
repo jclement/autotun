@@ -117,8 +117,10 @@ func TestSortKeyCycle(t *testing.T) {
 }
 
 func TestFilterStates(t *testing.T) {
+	frontend := row(3000, 3000, "node vite")
+	frontend.Label = "frontend"
 	rows := []tunnel.State{
-		row(3000, 3000, "node vite"),
+		frontend,
 		row(8080, 8080, "python3 -m http.server"),
 		skippedRow(5432, "postgres", tunnel.SkipPreexising),
 	}
@@ -128,6 +130,7 @@ func TestFilterStates(t *testing.T) {
 	}{
 		{"", []int{3000, 8080, 5432}},
 		{"node", []int{3000}},
+		{"frontend", []int{3000}},
 		{"NODE", []int{3000}}, // case-insensitive
 		{"python", []int{8080}},
 		{"3000", []int{3000}},

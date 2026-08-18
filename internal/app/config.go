@@ -23,6 +23,7 @@ type Config struct {
 	AcceptNewHost  bool
 	StrictHost     bool
 	ConnectTimeout time.Duration
+	Wait           bool
 
 	// Forwarding
 	Bind       string
@@ -55,6 +56,7 @@ func (c *Config) Flags(name string, errOut io.Writer) *pflag.FlagSet {
 	fs.StringArrayVarP(&c.IdentityFiles, "identity", "i", nil, "private key file (repeatable)")
 	fs.StringVarP(&c.ProxyJump, "jump", "J", "", "connect via this jump host")
 	fs.DurationVar(&c.ConnectTimeout, "connect-timeout", 20*time.Second, "SSH connect timeout")
+	fs.BoolVar(&c.Wait, "wait", false, "keep retrying until the initial SSH connection succeeds")
 	fs.BoolVar(&c.AcceptNewHost, "accept-new-host-key", false, "trust unknown host keys without asking")
 	fs.BoolVar(&c.StrictHost, "strict-host-key", false, "refuse hosts missing from known_hosts")
 	fs.BoolVar(&c.InsecureHost, "insecure-host-key", false, "skip host key verification entirely")
@@ -159,6 +161,7 @@ Examples:
   autotun --existing devbox            include ports already listening
   autotun --include 3000,8000-9000 dev only these ports
   autotun --bind 0.0.0.0 devbox        share the tunnels on your LAN
+  autotun --wait devbox                wait for a dev box that is still booting
   autotun --json devbox | jq .         machine-readable event stream
 
 Flags:`

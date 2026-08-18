@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -25,7 +26,7 @@ const (
 	wConns  = 6
 	wBytes  = 8
 	gap     = 2
-	minProc = 12
+	minProc = 11
 	// A very wide terminal should not stretch PROCESS across the whole screen:
 	// that strands AGE/CONNS/IN/OUT far from the row they describe and leaves a
 	// canyon of whitespace in between. Past this the table just stops growing.
@@ -102,6 +103,8 @@ func (m *Model) View() string {
 		view = overlayCenter(view, m.helpBox(), m.width, m.height)
 	case m.showDetail:
 		view = overlayCenter(view, m.detailBox(), m.width, m.height)
+	case m.protocolPrompt:
+		view = overlayCenter(view, m.protocolBox(), m.width, m.height)
 	case m.menu.open:
 		view = overlayCenter(view, m.menuBox(), m.width, m.height)
 	case m.offline():
@@ -191,7 +194,20 @@ func (m *Model) borderWith(left, right, lc, rc string) string {
 func (m *Model) topBorder() string {
 	t := m.th
 	title := t.Title.Render("autotun") + t.Separator.Render(" ▸ ") + t.Host.Render(m.opts.Host)
-	return m.borderWith(title, m.statusLine(), cornerTL, cornerTR)
+	status := m.statusLine()
+	if exposedBind(m.opts.Bind) {
+		// borderWith drops an overlong right label as a unit. A safety warning is
+		// not optional decoration, so compact the summary before that can happen.
+		need := 4 + ansi.StringWidth(title) + 2 + ansi.StringWidth(status) + 2
+		if need > m.width {
+			status = t.Bad.Render("LAN EXPOSED "+m.opts.Bind) +
+				t.Separator.Render(" · ") + m.statusChip()
+		}
+		if 4+ansi.StringWidth(title)+2+ansi.StringWidth(status)+2 > m.width {
+			status = t.Bad.Render("LAN EXPOSED " + m.opts.Bind)
+		}
+	}
+	return m.borderWith(title, status, cornerTL, cornerTR)
 }
 
 func (m *Model) separator() string {
@@ -233,6 +249,9 @@ func (m *Model) statusLine() string {
 	if m.ctrl.Policy().Paused {
 		parts = append(parts, t.Warning.Render("PAUSED"))
 	}
+	if exposedBind(m.opts.Bind) {
+		parts = append(parts, t.Bad.Render("LAN EXPOSED "+m.opts.Bind))
+	}
 	parts = append(parts, t.Good.Render(fmt.Sprintf("%d tunnel%s", active, plural(active))))
 	if skipped > 0 {
 		parts = append(parts, t.Meta.Render(fmt.Sprintf("%d idle", skipped)))
@@ -242,6 +261,15 @@ func (m *Model) statusLine() string {
 	}
 	parts = append(parts, t.Meta.Render(FormatUptime(m.now().Sub(m.started))))
 	return strings.Join(parts, t.Separator.Render(" · "))
+}
+
+func exposedBind(bind string) bool {
+	bind = strings.TrimSpace(bind)
+	if bind == "" || strings.EqualFold(bind, "localhost") {
+		return false
+	}
+	ip := net.ParseIP(strings.Trim(bind, "[]"))
+	return ip == nil || !ip.IsLoopback()
 }
 
 // statusChip renders the connection indicator.
@@ -282,29 +310,26 @@ func (m *Model) viewChip() string {
 	return strings.Join(parts, t.Separator.Render(" · "))
 }
 
-// tailWidth is the combined width of the AGE, CONNS, IN and OUT columns, which
-// is the region a skipped row's reason occupies instead.
-func tailWidth() int {
-	return wAge + gap + wConns + gap + wBytes + gap + wBytes
-}
+type columnKind int
 
-func (m *Model) procWidth() int {
-	used := 1 + wMark + 1 + wLocal + gap + wArrow + gap + wRemote + gap + wMode + gap +
-		wScheme + gap + tailWidth() + gap + 1
-	w := m.width - used
-	if w < minProc {
-		return minProc
-	}
-	if w > maxProc {
-		return maxProc
-	}
-	return w
-}
+const (
+	colLocal columnKind = iota
+	colArrow
+	colRemote
+	colMode
+	colScheme
+	colProcess
+	colAge
+	colConns
+	colIn
+	colOut
+)
 
 // column is one table column's position and meaning. The renderer and the
 // mouse hit-testing both read this, so a click always lands on the column the
 // user actually sees.
 type column struct {
+	kind     columnKind
 	title    string
 	x        int // first cell, in terminal coordinates
 	w        int
@@ -315,29 +340,92 @@ type column struct {
 	mode     bool // clicking a cell here cycles auto/on/off
 }
 
-// columns computes the table layout for the current width.
+// columns computes a responsive table layout. The mapping and service identity
+// are always present; secondary metrics disappear as groups when the terminal
+// narrows, instead of letting the right edge get blindly truncated.
 func (m *Model) columns() []column {
+	showMode, showScheme := true, true
+	showAge, showConns, showTraffic := true, true, true
+
+	build := func(procW int) []column {
+		cols := []column{
+			{kind: colLocal, title: "LOCAL", w: wLocal, right: true, sort: SortLocal, sortable: true},
+			{kind: colArrow, w: wArrow},
+			{kind: colRemote, title: "REMOTE", w: wRemote, right: true, sort: SortRemote, sortable: true},
+		}
+		if showMode {
+			cols = append(cols, column{kind: colMode, title: "M", w: wMode, mode: true})
+		}
+		if showScheme {
+			cols = append(cols, column{kind: colScheme, title: "VIA", w: wScheme, scheme: true})
+		}
+		cols = append(cols, column{kind: colProcess, title: "PROCESS", w: procW, sort: SortProcess, sortable: true})
+		if showAge {
+			cols = append(cols, column{kind: colAge, title: "AGE", w: wAge, right: true, sort: SortAge, sortable: true})
+		}
+		if showConns {
+			cols = append(cols, column{kind: colConns, title: "CONNS", w: wConns, right: true, sort: SortConns, sortable: true})
+		}
+		if showTraffic {
+			cols = append(cols,
+				column{kind: colIn, title: "IN", w: wBytes, right: true, sort: SortTraffic, sortable: true},
+				column{kind: colOut, title: "OUT", w: wBytes, right: true, sort: SortTraffic, sortable: true})
+		}
+		return cols
+	}
+	widthOf := func(cols []column) int {
+		w := wMark + 1
+		for i, c := range cols {
+			if i > 0 {
+				w += gap
+			}
+			w += c.w
+		}
+		return w
+	}
+	fits := func() bool { return widthOf(build(minProc)) <= m.inner() }
+	if !fits() {
+		showMode = false
+	}
+	if !fits() {
+		showTraffic = false
+	}
+	if !fits() {
+		showConns = false
+	}
+	if !fits() {
+		showAge = false
+	}
+	if !fits() {
+		showScheme = false
+	}
+
+	cols := build(minProc)
+	extra := m.inner() - widthOf(cols)
+	procW := minProc
+	if extra > 0 {
+		procW += extra
+		if procW > maxProc {
+			procW = maxProc
+		}
+		cols = build(procW)
+	}
+
 	x := 1 + wMark + 1 // left border, activity marker, space
-	next := func(title string, w int, right bool, key SortKey, sortable bool) column {
-		c := column{title: title, x: x, w: w, right: right, sort: key, sortable: sortable}
-		x += w + gap
-		return c
+	for i := range cols {
+		cols[i].x = x
+		x += cols[i].w + gap
 	}
-	cols := []column{
-		next("LOCAL", wLocal, true, SortLocal, true),
-		next("", wArrow, false, SortRemote, false),
-		next("REMOTE", wRemote, true, SortRemote, true),
-		next("M", wMode, false, SortRemote, false),
-		next("VIA", wScheme, false, SortRemote, false),
-		next("PROCESS", m.procWidth(), false, SortProcess, true),
-		next("AGE", wAge, true, SortAge, true),
-		next("CONNS", wConns, true, SortConns, true),
-		next("IN", wBytes, true, SortTraffic, true),
-		next("OUT", wBytes, true, SortTraffic, true),
-	}
-	cols[3].mode = true
-	cols[4].scheme = true
 	return cols
+}
+
+func (m *Model) procWidth() int {
+	for _, c := range m.columns() {
+		if c.kind == colProcess {
+			return c.w
+		}
+	}
+	return minProc
 }
 
 // columnAt returns the column under a terminal x position.
@@ -497,46 +585,78 @@ func (m *Model) rowView(s tunnel.State, selected bool) string {
 // rowText lays out one row's columns without applying the row-level style.
 func (m *Model) rowText(s tunnel.State, act activity, local, arrow, remote, cmd string, now time.Time) string {
 	prefix := m.marker(act) + " "
-	mode := modeGlyph(s.Mode)
-
-	// Non-forwarding rows say why, in place of the traffic columns. The reason
-	// starts at AGE — the first column it replaces — so it stays anchored to
-	// the row it belongs to instead of floating off at the far right.
-	if s.Status != tunnel.StatusActive {
-		reason := string(s.Skip)
-		if s.Status == tunnel.StatusError {
-			reason = s.Err
+	cols := m.columns()
+	procAt := -1
+	for i, c := range cols {
+		if c.kind == colProcess {
+			procAt = i
+			break
 		}
+	}
 
-		// A long reason borrows width from the process column, moving its start
-		// left so more of it fits before the frame edge.
-		procW := m.procWidth()
-		if over := ansi.StringWidth(reason) - tailWidth(); over > 0 {
-			if borrow := min(over, procW-minProc); borrow > 0 {
-				procW -= borrow
+	reason := ""
+	switch s.Status {
+	case tunnel.StatusError:
+		reason = s.Err
+	case tunnel.StatusOffline:
+		reason = "offline"
+	case tunnel.StatusSkipped:
+		reason = string(s.Skip)
+	}
+	hasTail := procAt >= 0 && procAt < len(cols)-1
+
+	var values []string
+	for i, c := range cols {
+		if reason != "" && hasTail && i > procAt {
+			break
+		}
+		value := ""
+		switch c.kind {
+		case colLocal:
+			value = local
+		case colArrow:
+			value = arrow
+		case colRemote:
+			value = remote
+		case colMode:
+			value = modeGlyph(s.Mode)
+		case colScheme:
+			value = s.Scheme.Label()
+		case colProcess:
+			value = displayProcess(s, cmd)
+			if reason != "" && !hasTail {
+				value = reason
 			}
+		case colAge:
+			value = FormatAge(now.Sub(s.Created))
+		case colConns:
+			value = itoa(s.ActiveConns)
+		case colIn:
+			value = FormatBytes(s.BytesIn)
+		case colOut:
+			value = FormatBytes(s.BytesOut)
 		}
-
-		return prefix + padLeft(local, wLocal) + strings.Repeat(" ", gap) + arrow +
-			strings.Repeat(" ", gap) + padLeft(remote, wRemote) + strings.Repeat(" ", gap) +
-			mode + strings.Repeat(" ", gap) +
-			pad(s.Scheme.Label(), wScheme) + strings.Repeat(" ", gap) +
-			pad(cmd, procW) + strings.Repeat(" ", gap) + reason
+		if c.right {
+			values = append(values, padLeft(value, c.w))
+		} else {
+			values = append(values, pad(value, c.w))
+		}
 	}
-
-	cols := []string{
-		padLeft(local, wLocal),
-		arrow,
-		padLeft(remote, wRemote),
-		mode,
-		pad(s.Scheme.Label(), wScheme),
-		pad(cmd, m.procWidth()),
-		padLeft(FormatAge(now.Sub(s.Created)), wAge),
-		padLeft(itoa(s.ActiveConns), wConns),
-		padLeft(FormatBytes(s.BytesIn), wBytes),
-		padLeft(FormatBytes(s.BytesOut), wBytes),
+	line := prefix + strings.Join(values, strings.Repeat(" ", gap))
+	if reason != "" && hasTail {
+		line += strings.Repeat(" ", gap) + reason
 	}
-	return prefix + strings.Join(cols, strings.Repeat(" ", gap))
+	return line
+}
+
+func displayProcess(s tunnel.State, fallback string) string {
+	if s.Label == "" {
+		return fallback
+	}
+	if fallback == "" || fallback == "(unknown)" {
+		return s.Label
+	}
+	return s.Label + " · " + fallback
 }
 
 // marker is the leading activity glyph: a filled dot for a tunnel carrying
@@ -562,6 +682,9 @@ func (m *Model) editorLabel() string {
 	case editorLocalPort:
 		prompt = fmt.Sprintf("local port for remote %d", m.editorPort)
 		hint = "blank resets · enter to apply · esc to cancel"
+	case editorPortLabel:
+		prompt = fmt.Sprintf("name for remote %d", m.editorPort)
+		hint = "blank clears · enter to remember · esc to cancel"
 	}
 	return t.Key.Render(prompt) + t.Meta.Render(" ▸ ") + m.input.Render(t) +
 		t.Faintest.Render("   "+hint)
@@ -632,9 +755,8 @@ func (m *Model) offline() bool {
 
 // reconnectBox is the waiting screen shown while the link is down.
 //
-// It says what is being kept, not just what is broken: the tunnels are still
-// held, their local ports are still reserved, and they come back on the same
-// numbers — so the browser tab you left open keeps working.
+// It says what is remembered, not just what is broken: the local assignments
+// are retained and autotun tries to reclaim them after reconnecting.
 func (m *Model) reconnectBox() string {
 	t := m.th
 
@@ -658,8 +780,8 @@ func (m *Model) reconnectBox() string {
 	}
 
 	if held > 0 {
-		b.WriteString(t.Value.Render(fmt.Sprintf("Holding %d tunnel%s.", held, plural(held))) + "\n")
-		b.WriteString(t.Faintest.Render("Their local ports stay reserved and come back on the same numbers.") + "\n\n")
+		b.WriteString(t.Value.Render(fmt.Sprintf("Remembering %d tunnel assignment%s.", held, plural(held))) + "\n")
+		b.WriteString(t.Faintest.Render("autotun will try to reclaim the same local port numbers.") + "\n\n")
 	}
 
 	switch {
@@ -702,6 +824,65 @@ func (m *Model) confirmBox() string {
 	return t.Box.Render(body)
 }
 
+func (m *Model) protocolBox() string {
+	t := m.th
+	s, ok := m.selected()
+	if !ok {
+		return ""
+	}
+	body := t.BoxTitle.Render(fmt.Sprintf("Open remote :%d", s.RemotePort)) + "\n\n" +
+		t.Meta.Render("Choose the web protocol. This is remembered for this host and port.") + "\n\n" +
+		t.Key.Render("enter / h") + t.KeyDesc.Render(" http") + t.Faintest.Render("   ·   ") +
+		t.Key.Render("s") + t.KeyDesc.Render(" https") + t.Faintest.Render("   ·   ") +
+		t.Key.Render("esc") + t.KeyDesc.Render(" cancel")
+	return t.Box.Render(body)
+}
+
+func (m *Model) protocolChoiceAt(x, y int) tunnel.Scheme {
+	box := m.protocolBox()
+	lines := strings.Split(box, "\n")
+	if len(lines) < 2 {
+		return tunnel.SchemeUnknown
+	}
+	boxW := 0
+	for _, line := range lines {
+		if w := ansi.StringWidth(line); w > boxW {
+			boxW = w
+		}
+	}
+	left := (m.width - boxW) / 2
+	top := (m.height - len(lines)) / 2
+	if left < 0 {
+		left = 0
+	}
+	if top < 0 {
+		top = 0
+	}
+	choiceRow := len(lines) - 2
+	if y != top+choiceRow {
+		return tunnel.SchemeUnknown
+	}
+	plain := ansi.Strip(lines[choiceRow])
+	for _, choice := range []struct {
+		needle string
+		scheme tunnel.Scheme
+	}{
+		{"enter / h http", tunnel.SchemeHTTP},
+		{"s https", tunnel.SchemeHTTPS},
+	} {
+		start := strings.Index(plain, choice.needle)
+		if start < 0 {
+			continue
+		}
+		cellStart := ansi.StringWidth(plain[:start])
+		cellEnd := cellStart + ansi.StringWidth(choice.needle)
+		if x >= left+cellStart && x < left+cellEnd {
+			return choice.scheme
+		}
+	}
+	return tunnel.SchemeUnknown
+}
+
 func (m *Model) detailBox() string {
 	t := m.th
 	s, ok := m.selected()
@@ -717,8 +898,13 @@ func (m *Model) detailBox() string {
 
 	var b strings.Builder
 	b.WriteString(t.BoxTitle.Render(fmt.Sprintf("remote :%d", s.RemotePort)) + "\n\n")
+	b.WriteString(row("name", s.Label))
 	if s.Status == tunnel.StatusActive {
-		b.WriteString(row("url", s.URL()))
+		if s.Scheme == tunnel.SchemeUnknown {
+			b.WriteString(row("endpoint", s.Endpoint()))
+		} else {
+			b.WriteString(row("url", s.URL()))
+		}
 		b.WriteString(row("local", fmt.Sprintf("%s:%d", s.LocalAddr, s.LocalPort)))
 		if s.Remapped {
 			b.WriteString(row("", t.Warning.Render("remapped — the remote port was busy locally")))
@@ -758,6 +944,9 @@ func (m *Model) detailBox() string {
 }
 
 func (m *Model) helpBox() string {
+	if m.height < 36 {
+		return m.compactHelpBox()
+	}
 	t := m.th
 	sections := []struct {
 		title string
@@ -766,25 +955,27 @@ func (m *Model) helpBox() string {
 		{"navigate", [][2]string{
 			{"↑ ↓ / j k", "move"},
 			{"g / G", "first / last"},
-			{"/", "search by port or process"},
+			{"/", "search by port, name or process"},
 			{"s / r", "cycle sort / reverse"},
 		}},
 		{"a port", [][2]string{
 			{"enter, d", "detail"},
 			{"t", "say http or https (remembered)"},
-			{"o, space", "open in browser — needs t first"},
+			{"o, space", "open in browser — asks HTTP/HTTPS when needed"},
 			{"a", "auto → on → off (remembered)"},
 			{"l", "set the local port (remembered)"},
-			{"y", "copy the URL to your clipboard"},
+			{"n", "name this port (remembered)"},
+			{"y", "copy URL, or host:port for raw TCP"},
 		}},
 		{"everything", [][2]string{
 			{"c", "settings: what is listed and how"},
-			{"p", "pause automatic forwarding"},
+			{"p", "pause new automatic tunnels; current ones stay up"},
 		}},
 		{"mouse", [][2]string{
 			{"click", "select a row"},
 			{"double click", "open in browser"},
 			{"click M / VIA", "cycle mode / protocol"},
+			{"click protocol", "choose HTTP/HTTPS in the open popup"},
 			{"click header", "sort by that column"},
 			{"click keybar", "run that action"},
 		}},
@@ -804,6 +995,35 @@ func (m *Model) helpBox() string {
 		}
 	}
 	b.WriteString("\n" + t.Faintest.Render("? or esc to close"))
+	return t.Box.Render(b.String())
+}
+
+// compactHelpBox keeps the complete keyboard surface visible in the common
+// 80×24 terminal instead of rendering a tall popup whose lower half is clipped.
+func (m *Model) compactHelpBox() string {
+	t := m.th
+	row := func(keys, desc string) string {
+		return "  " + t.Key.Render(pad(keys, 13)) + t.KeyDesc.Render(desc) + "\n"
+	}
+	var b strings.Builder
+	b.WriteString(t.BoxTitle.Render("autotun "+m.opts.Version) + "\n")
+	b.WriteString(t.Meta.Render("navigate") + "\n")
+	b.WriteString(row("↑↓ / j k / gG", "move / first / last"))
+	b.WriteString(row("/", "search port, name or process"))
+	b.WriteString(row("s / r", "cycle sort / reverse"))
+	b.WriteString(t.Meta.Render("a port") + "\n")
+	b.WriteString(row("enter, d", "detail"))
+	b.WriteString(row("o, space", "open in browser; asks HTTP/HTTPS"))
+	b.WriteString(row("t", "cycle unknown / http / https"))
+	b.WriteString(row("a", "auto / on / off"))
+	b.WriteString(row("l / n", "local port / name"))
+	b.WriteString(row("y", "copy URL or host:port"))
+	b.WriteString(t.Meta.Render("everything") + "\n")
+	b.WriteString(row("c / p", "settings / pause new tunnels"))
+	b.WriteString(row("mouse", "rows, controls, headers and wheel"))
+	b.WriteString(t.Meta.Render("leave") + "\n")
+	b.WriteString(row("esc, q / ^C", "ask to quit / quit now"))
+	b.WriteString(t.Faintest.Render("? or esc to close"))
 	return t.Box.Render(b.String())
 }
 

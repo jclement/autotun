@@ -29,6 +29,39 @@ func TestViewRendersTheTable(t *testing.T) {
 	}
 }
 
+func TestViewShowsPortLabelWithProcessContext(t *testing.T) {
+	labeled := row(3000, 3000, "node /app/server.js")
+	labeled.Label = "frontend"
+	m := newModel(t, newStub(labeled))
+	view := plainView(m)
+	if !strings.Contains(view, "frontend · node") {
+		t.Errorf("labeled service missing name/process context:\n%s", view)
+	}
+}
+
+func TestViewWarnsWhenTunnelsAreExposed(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node"))
+	m := New(stub, Options{Host: "devbox", Bind: "0.0.0.0", Now: func() time.Time { return testNow }})
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m.reload()
+	if !strings.Contains(plainView(m), "LAN EXPOSED 0.0.0.0") {
+		t.Errorf("public bind warning missing:\n%s", plainView(m))
+	}
+
+	m.opts.Bind = "127.0.0.1"
+	if strings.Contains(plainView(m), "LAN EXPOSED") {
+		t.Error("loopback bind should not be reported as exposed")
+	}
+}
+
+func TestCompactHelpFitsTypicalTerminalHeight(t *testing.T) {
+	m := newModel(t, newStub(row(3000, 3000, "node")))
+	send(m, "?")
+	if lines := strings.Count(m.View(), "\n") + 1; lines != m.height {
+		t.Errorf("help frame is %d lines in a %d-line terminal", lines, m.height)
+	}
+}
+
 // Nothing may exceed the terminal width, or the whole table wraps and shears.
 func TestViewNeverExceedsTheTerminalWidth(t *testing.T) {
 	rows := []tunnel.State{
@@ -454,10 +487,36 @@ func TestViewCapsTheProcessColumn(t *testing.T) {
 		t.Errorf("the last column ends at %d, past the frame", last.x+last.w)
 	}
 
-	// And a narrow terminal still gets a usable process column.
+	// A narrow terminal gives the process column any spare room after dropping
+	// secondary metrics, rather than clipping the right edge.
 	m.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
-	if got := m.procWidth(); got != minProc {
-		t.Errorf("procWidth at 50 columns = %d, want the %d floor", got, minProc)
+	if got := m.procWidth(); got < minProc {
+		t.Errorf("procWidth at 50 columns = %d, want at least %d", got, minProc)
+	}
+}
+
+func TestViewDropsResponsiveColumnGroups(t *testing.T) {
+	has := func(cols []column, kind columnKind) bool {
+		for _, c := range cols {
+			if c.kind == kind {
+				return true
+			}
+		}
+		return false
+	}
+	m := newModel(t, newStub(row(3000, 3000, "node")))
+
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	if has(m.columns(), colMode) || !has(m.columns(), colIn) || !has(m.columns(), colOut) {
+		t.Errorf("80-column layout should drop mode but keep traffic: %+v", m.columns())
+	}
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	if has(m.columns(), colIn) || !has(m.columns(), colAge) || !has(m.columns(), colConns) {
+		t.Errorf("60-column layout should keep age/conns but drop traffic: %+v", m.columns())
+	}
+	m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	if has(m.columns(), colScheme) || !has(m.columns(), colProcess) {
+		t.Errorf("40-column layout should keep process and drop scheme: %+v", m.columns())
 	}
 }
 
@@ -528,15 +587,16 @@ func TestViewReconnectScreen(t *testing.T) {
 	}
 
 	view := plainView(m)
-	for _, want := range []string{"Connection lost", "connection reset", "Holding 1 tunnel", "Next attempt in 4s", "attempt 3", "r try now"} {
+	for _, want := range []string{"Connection lost", "connection reset", "Remembering 1 tunnel assignment", "Next attempt in 4s", "attempt 3", "r try now"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("the reconnect screen is missing %q:\n%s", want, view)
 		}
 	}
 
-	// And it says the ports are kept, which is the reassuring part.
-	if !strings.Contains(view, "same numbers") {
-		t.Errorf("the screen should say the local ports are held:\n%s", view)
+	// The copy is deliberately accurate: assignments are remembered and the
+	// same numbers are attempted, but listeners are not held during the outage.
+	if !strings.Contains(view, "try to reclaim") {
+		t.Errorf("the screen should explain same-port recovery accurately:\n%s", view)
 	}
 
 	m.Update(StatusMsg{State: Reconnecting, Attempt: 4})

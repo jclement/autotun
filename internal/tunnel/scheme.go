@@ -9,8 +9,8 @@ import (
 type Scheme string
 
 const (
-	// SchemeUnknown means we have not been told and could not tell. Opening
-	// still assumes HTTP, which is right far more often than not on a dev box.
+	// SchemeUnknown means we have not been told and could not tell. Interactive
+	// opening asks the user, while raw output exposes only the host:port endpoint.
 	SchemeUnknown Scheme = ""
 	SchemeHTTP    Scheme = "http"
 	SchemeHTTPS   Scheme = "https"
@@ -41,8 +41,8 @@ func ParseScheme(s string) Scheme {
 	}
 }
 
-// URLScheme returns the scheme to build a URL with. Unknown falls back to
-// http, but callers are expected to ask before opening rather than lean on it.
+// URLScheme returns the scheme to build a URL with. Callers must handle unknown
+// before using it; the fallback keeps the zero value harmless internally.
 func (s Scheme) URLScheme() string {
 	if s == SchemeHTTPS {
 		return "https"

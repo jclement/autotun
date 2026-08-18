@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -54,7 +55,7 @@ func TestFlagParsing(t *testing.T) {
 		"--existing", "--include", "3000,8000-9000", "--exclude", "8080",
 		"--min-port", "2000", "--max-port", "60000",
 		"--remote-bind", "loopback", "--same-port",
-		"--interval", "500ms", "--json", "--no-dissolve",
+		"--interval", "500ms", "--json", "--no-dissolve", "--wait",
 		"devbox",
 	)
 	if err != nil {
@@ -72,8 +73,33 @@ func TestFlagParsing(t *testing.T) {
 	if cfg.Bind != "0.0.0.0" || !cfg.Existing || !cfg.SamePort || !cfg.JSON {
 		t.Errorf("forwarding flags = %+v", cfg)
 	}
+	if !cfg.Wait {
+		t.Error("--wait was not parsed")
+	}
 	if cfg.Interval != 500*time.Millisecond {
 		t.Errorf("--interval = %v", cfg.Interval)
+	}
+}
+
+func TestConnectInitialWaitsUntilContextEnds(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var out strings.Builder
+	_, err = connectInitial(ctx, &sshx.Destination{Host: "127.0.0.1", Port: port, User: "tester"}, sshx.ConnectOptions{
+		Timeout: 50 * time.Millisecond, HostKeyPolicy: sshx.HostKeyNone,
+	}, true, &out)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context deadline", err)
+	}
+	if !strings.Contains(out.String(), "retrying in 1s") {
+		t.Errorf("--wait did not enter the retry loop:\n%s", out.String())
 	}
 }
 

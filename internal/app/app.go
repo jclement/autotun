@@ -96,9 +96,8 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 	}
 
 	// Connect before the TUI starts so passphrase and host-key prompts have a
-	// terminal to use.
-	fmt.Fprintf(iostreams.Err, "connecting to %s…\n", dest.String())
-	client, err := sshx.Connect(ctx, dest, connOpts)
+	// terminal to use. --wait is useful when a dev box is still booting.
+	client, err := connectInitial(ctx, dest, connOpts, cfg.Wait, iostreams.Err)
 	if err != nil {
 		return err
 	}
@@ -162,6 +161,7 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 
 	model := ui.New(&uiController{Manager: mgr, settings: settings, host: host}, ui.Options{
 		Host:     host,
+		Bind:     cfg.Bind,
 		Version:  buildinfo.Version(),
 		Dissolve: !cfg.NoDissolve,
 		Retry:    sup.retryNow,
@@ -185,6 +185,28 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 		return uiErr
 	}
 	return model.Err()
+}
+
+// connectInitial establishes the first SSH connection. Reconnects are managed
+// by supervisor after the app is running; --wait extends that resilience to a
+// host that is not reachable yet when autotun starts.
+func connectInitial(ctx context.Context, dest *sshx.Destination, opts sshx.ConnectOptions, wait bool, errOut io.Writer) (*sshx.Client, error) {
+	backoff := backoffStart
+	for attempt := 1; ; attempt++ {
+		fmt.Fprintf(errOut, "connecting to %s…\n", dest.String())
+		client, err := sshx.Connect(ctx, dest, opts)
+		if err == nil {
+			return client, nil
+		}
+		if !wait || ctx.Err() != nil {
+			return nil, err
+		}
+		fmt.Fprintf(errOut, "connection failed: %v; retrying in %s (attempt %d)\n", err, backoff, attempt)
+		if !sleepCtx(ctx, backoff) {
+			return nil, ctx.Err()
+		}
+		backoff = nextBackoff(backoff)
+	}
 }
 
 // runHeadless drives the app without a TUI. The caller's context carries the

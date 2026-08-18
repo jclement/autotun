@@ -423,8 +423,36 @@ func TestManagerSetLocalPortRejectsBadInput(t *testing.T) {
 	}
 }
 
+func TestManagerSetLabelIsRemembered(t *testing.T) {
+	echo := newEchoServer(t)
+	memory := newMemoryStore()
+	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: echo.addr()}, Options{
+		Policy: DefaultPolicy(), Host: "devbox", Settings: memory,
+	})
+	defer m.Close()
+	port := freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(port))
+
+	if err := m.SetLabel(port, "  front   end  "); err != nil {
+		t.Fatal(err)
+	}
+	if got := stateFor(t, m, port).Label; got != "front end" {
+		t.Errorf("label = %q, want normalized label", got)
+	}
+	if got := memory.Port("devbox", port).Label; got != "front end" {
+		t.Errorf("remembered label = %q", got)
+	}
+	if err := m.SetLabel(port, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := memory.Port("devbox", port).Label; got != "" {
+		t.Errorf("cleared label remained %q", got)
+	}
+}
+
 func TestManagerSetPolicyReevaluatesEverything(t *testing.T) {
-	m, _, _ := newTestManager(t, DefaultPolicy())
+	m, dialer, _ := newTestManager(t, DefaultPolicy())
 
 	port := freePort(t)
 	m.Sync(snapshotOf(port)) // baseline: skipped
@@ -440,11 +468,33 @@ func TestManagerSetPolicyReevaluatesEverything(t *testing.T) {
 		t.Errorf("status = %q, want active after enabling --existing", st.Status)
 	}
 
-	// Pausing tears the tunnel back down.
+	// Pausing leaves current automatic tunnels alone.
 	p.Paused = true
 	m.SetPolicy(p)
-	if st := stateFor(t, m, port); st.Status == StatusActive {
-		t.Error("pausing should close the tunnel")
+	if st := stateFor(t, m, port); st.Status != StatusActive {
+		t.Errorf("pausing closed an existing tunnel: %q", st.Status)
+	}
+	m.SetDialer(nil)
+	if st := stateFor(t, m, port); st.Status != StatusOffline {
+		t.Errorf("paused tunnel during outage = %q, want offline", st.Status)
+	}
+	m.SetDialer(dialer)
+	if st := stateFor(t, m, port); st.Status != StatusActive {
+		t.Errorf("paused tunnel after reconnect = %q, want active", st.Status)
+	}
+
+	// But an automatic service that appears while paused waits.
+	newPort := freePort(t)
+	m.Sync(snapshotOf(port, newPort))
+	if st := stateFor(t, m, newPort); st.Status != StatusSkipped || st.Skip != SkipPaused {
+		t.Errorf("new service while paused = %q/%q, want skipped/paused", st.Status, st.Skip)
+	}
+
+	// Resuming opens what arrived during the pause.
+	p.Paused = false
+	m.SetPolicy(p)
+	if st := stateFor(t, m, newPort); st.Status != StatusActive {
+		t.Errorf("waiting service after resume = %q, want active", st.Status)
 	}
 }
 
@@ -665,8 +715,9 @@ func TestStateURL(t *testing.T) {
 		st   State
 		want string
 	}{
-		{"active loopback", State{Status: StatusActive, LocalAddr: "127.0.0.1", LocalPort: 3000}, "http://127.0.0.1:3000"},
-		{"wildcard becomes localhost", State{Status: StatusActive, LocalAddr: "0.0.0.0", LocalPort: 3000}, "http://localhost:3000"},
+		{"active unknown has no URL", State{Status: StatusActive, LocalAddr: "127.0.0.1", LocalPort: 3000}, ""},
+		{"active HTTP", State{Status: StatusActive, LocalAddr: "127.0.0.1", LocalPort: 3000, Scheme: SchemeHTTP}, "http://127.0.0.1:3000"},
+		{"wildcard becomes localhost", State{Status: StatusActive, LocalAddr: "0.0.0.0", LocalPort: 3000, Scheme: SchemeHTTP}, "http://localhost:3000"},
 		{"skipped has no URL", State{Status: StatusSkipped, LocalPort: 3000}, ""},
 	}
 	for _, tt := range tests {

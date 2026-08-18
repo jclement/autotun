@@ -89,7 +89,14 @@ func sortStates(rows []tunnel.State, key SortKey, reverse, inactiveLast bool) {
 				return a.LocalPort < b.LocalPort
 			}
 		case SortProcess:
-			if c := strings.Compare(strings.ToLower(a.Cmd), strings.ToLower(b.Cmd)); c != 0 {
+			an, bn := a.Label, b.Label
+			if an == "" {
+				an = a.Cmd
+			}
+			if bn == "" {
+				bn = b.Cmd
+			}
+			if c := strings.Compare(strings.ToLower(an), strings.ToLower(bn)); c != 0 {
 				return c < 0
 			}
 		case SortAge:
@@ -146,6 +153,7 @@ func filterStates(rows []tunnel.State, query string) []tunnel.State {
 
 func matches(r tunnel.State, q string) bool {
 	if strings.Contains(strings.ToLower(r.Cmd), q) ||
+		strings.Contains(strings.ToLower(r.Label), q) ||
 		strings.Contains(strings.ToLower(r.Proc), q) ||
 		strings.Contains(strconv.Itoa(r.RemotePort), q) ||
 		strings.Contains(strconv.Itoa(r.LocalPort), q) ||

@@ -174,6 +174,28 @@ func TestManagerRestoresRememberedScheme(t *testing.T) {
 	}
 }
 
+func TestManagerSetSchemeDirectly(t *testing.T) {
+	echo := newEchoServer(t)
+	memory := newMemoryStore()
+	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: echo.addr()}, Options{
+		Policy: DefaultPolicy(), Host: "devbox", Settings: memory,
+	})
+	defer m.Close()
+	port := freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(port))
+
+	if got := m.SetScheme(port, SchemeHTTPS); got != SchemeHTTPS {
+		t.Fatalf("SetScheme = %q", got)
+	}
+	if st := stateFor(t, m, port); st.Scheme != SchemeHTTPS || !st.SchemePinned {
+		t.Errorf("state = %q pinned %v", st.Scheme, st.SchemePinned)
+	}
+	if got := memory.Port("devbox", port).Scheme; got != "https" {
+		t.Errorf("remembered scheme = %q", got)
+	}
+}
+
 func TestSniffScheme(t *testing.T) {
 	tests := []struct {
 		name string

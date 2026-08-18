@@ -187,10 +187,7 @@ func TestModelSchemeChangesTheOpenedURL(t *testing.T) {
 	}
 }
 
-// Opening an unidentified port would mean guessing at its protocol, and a
-// wrong guess sends a plaintext request at something that may not want one.
-// It asks instead — one keystroke, and the answer is remembered.
-func TestModelOpenRequiresAKnownScheme(t *testing.T) {
+func TestModelOpenUnknownSchemeOffersAChooser(t *testing.T) {
 	var opened []string
 	stub := newStub(row(3000, 3000, "node"))
 	m := New(stub, Options{
@@ -204,18 +201,49 @@ func TestModelOpenRequiresAKnownScheme(t *testing.T) {
 	if len(opened) != 0 {
 		t.Errorf("opened %v without knowing the protocol", opened)
 	}
-	if !m.toast.Bad || !strings.Contains(m.toast.Text, "press t") {
-		t.Errorf("toast = %q, should point at the t key", m.toast.Text)
+	if !m.protocolPrompt || !strings.Contains(plainView(m), "Choose the web protocol") {
+		t.Fatalf("opening an unknown service did not show the protocol chooser")
 	}
 
-	// Once told, it opens with what it was told.
-	send(m, "t", " ")
+	// Enter chooses HTTP, opens immediately, and remembers it.
+	send(m, "enter")
 	if len(opened) != 1 || opened[0] != "http://127.0.0.1:3000" {
-		t.Errorf("opened = %v, want the http URL once set", opened)
+		t.Errorf("opened = %v, want the chosen http URL", opened)
 	}
-	send(m, "t", " ")
+	if got := stub.schemes[3000]; got != tunnel.SchemeHTTP {
+		t.Errorf("remembered scheme = %q, want http", got)
+	}
+
+	stub.SetScheme(3000, tunnel.SchemeUnknown)
+	m.reload()
+	send(m, "o", "s")
 	if len(opened) != 2 || opened[1] != "https://127.0.0.1:3000" {
-		t.Errorf("opened = %v, want the https URL after switching", opened)
+		t.Errorf("opened = %v, want the chosen https URL", opened)
+	}
+}
+
+func TestProtocolChooserIsClickable(t *testing.T) {
+	var opened []string
+	m := New(newStub(row(3000, 3000, "node")), Options{
+		Host: "devbox", Now: func() time.Time { return testNow },
+		OpenURL: func(u string) error { opened = append(opened, u); return nil },
+	})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.reload()
+	send(m, "down", "o")
+
+	clicked := false
+	for y := 0; y < m.height && !clicked; y++ {
+		for x := 0; x < m.width; x++ {
+			if m.protocolChoiceAt(x, y) == tunnel.SchemeHTTPS {
+				m.Update(clickAt(x, y))
+				clicked = true
+				break
+			}
+		}
+	}
+	if !clicked || len(opened) != 1 || opened[0] != "https://127.0.0.1:3000" {
+		t.Errorf("clicked=%v opened=%v", clicked, opened)
 	}
 }
 

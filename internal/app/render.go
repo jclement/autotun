@@ -70,7 +70,9 @@ type tunnelEvent struct {
 	LocalPort  int    `json:"local_port,omitempty"`
 	Remapped   bool   `json:"remapped,omitempty"`
 	PID        int    `json:"pid,omitempty"`
+	Label      string `json:"label,omitempty"`
 	Command    string `json:"command,omitempty"`
+	Endpoint   string `json:"endpoint,omitempty"`
 	URL        string `json:"url,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 }
@@ -95,7 +97,9 @@ func (r *JSONRenderer) Event(e tunnel.Event) {
 		LocalPort:  s.LocalPort,
 		Remapped:   s.Remapped,
 		PID:        s.PID,
+		Label:      s.Label,
 		Command:    s.Cmd,
+		Endpoint:   s.Endpoint(),
 		URL:        s.URL(),
 		Reason:     e.Msg,
 	})

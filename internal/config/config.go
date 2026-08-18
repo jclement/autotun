@@ -80,6 +80,8 @@ func (m Mode) Next() Mode {
 
 // Port holds the remembered settings for one remote port.
 type Port struct {
+	// Label is a human-friendly name for the service, such as "frontend".
+	Label string `yaml:"label,omitempty"`
 	// Scheme is "http" or "https"; empty means undetermined.
 	Scheme string `yaml:"scheme,omitempty"`
 	// Mode is auto, on or off; empty means auto.
@@ -90,7 +92,8 @@ type Port struct {
 
 // IsZero reports whether the entry holds nothing worth persisting.
 func (p Port) IsZero() bool {
-	return p.Scheme == "" && (p.Mode == "" || Mode(p.Mode) == ModeAuto) && p.Local == 0
+	return p.Label == "" && p.Scheme == "" &&
+		(p.Mode == "" || Mode(p.Mode) == ModeAuto) && p.Local == 0
 }
 
 // Host holds the remembered settings for one destination.

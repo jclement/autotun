@@ -146,9 +146,8 @@ Then it takes over the screen and tells you what it's doing:
 │                                                               │
 │  connection lost: read tcp 10.0.0.4:52233->10.0.0.9:22: reset │
 │                                                               │
-│  Holding 2 tunnels.                                           │
-│  Their local ports stay reserved and come back on the same     │
-│  numbers.                                                     │
+│  Remembering 2 tunnel assignments.                            │
+│  autotun will try to reclaim the same local port numbers.      │
 │                                                               │
 │  Next attempt in 7s   (attempt 3)                             │
 │                                                               │
@@ -156,10 +155,10 @@ Then it takes over the screen and tells you what it's doing:
 ╰───────────────────────────────────────────────────────────────╯
 ```
 
-The tunnels are *held*, not torn down: their local ports stay reserved and come back on the
-same numbers, so the browser tab you left open keeps working. Reconnection backs off from 1 to
-30 seconds, and `r` cuts the wait short — which is what you press after opening the lid,
-rather than sitting through a timer that was set before it slept.
+The local assignments are remembered, and autotun tries to reclaim the same numbers after it
+reconnects, so browser tabs normally keep working. The listeners are not held open during the
+outage, which means another local process can win that port first. Reconnection backs off from
+1 to 30 seconds, and `r` cuts the wait short — which is what you press after opening the lid.
 
 **It never sends your services anything they didn't ask for.** autotun does not probe. It
 doesn't open a speculative connection, doesn't fire a `GET /`, and doesn't offer a TLS
@@ -171,8 +170,9 @@ opens with a handshake or an alert record, an HTTP server opens with its status 
 silent, and it self-corrects — point it at an HTTPS service over plain HTTP and the alert it
 sends back is what teaches autotun it was HTTPS all along.
 
-Until something is known, a port says `unknown` and `o` politely refuses rather than guessing:
-press `t` to say which it is, and that answer is remembered for that host and port forever.
+Until something is known, a port says `unknown`. Pressing `o` opens a tiny HTTP/HTTPS chooser,
+then launches the browser and remembers the answer for that host and port. `t` still cycles the
+choice directly when you want to change it later.
 
 **It's a real SSH client, not a wrapper.** `golang.org/x/crypto/ssh`, one `direct-tcpip`
 channel per connection. It never shells out to `ssh -L`. That's what makes the live byte
@@ -186,14 +186,15 @@ someone else's stderr and hoping.
 | `↑↓` / `j k`, `g` / `G`, `pgup` / `pgdn` | move around — nothing is highlighted until you do |
 | `enter`, `d` | detail pane |
 | `t` | say http / https — **remembered** |
-| `o`, `space` | open in a browser (needs `t` first) |
+| `o`, `space` | open in a browser; choose HTTP/HTTPS when it is not known yet |
 | `a` | auto → always on → never — **remembered** |
 | `l` | pin the local port — **remembered** |
-| `y` | copy the URL to your clipboard |
+| `n` | give the port a friendly name — **remembered** |
+| `y` | copy the URL, or `host:port` for an unknown/raw TCP service |
 | `c` | settings popup — what is listed and how, **remembered per host** |
-| `p` | pause automatic forwarding |
+| `p` | pause new automatic tunnels; current tunnels stay up |
 | `s` / `r` | cycle sort / reverse |
-| `/` | search by port or process |
+| `/` | search by port, name or process |
 | `esc`, `q` | quit — it asks first, then dissolves the screen in green rain |
 | `ctrl+c` | quit *right now*, no theatrics |
 
@@ -205,14 +206,32 @@ And the whole thing is clickable, because it's 2026 and you have a mouse:
 | double-click a row | open it in a browser |
 | click the `M` cell | cycle auto → on → off |
 | click the `VIA` cell | cycle unknown → http → https |
+| click HTTP/HTTPS in the open popup | choose, remember and open |
 | click a column header | sort by it; click again to reverse |
 | click anything in the key bar | run that action |
 | click a row in the `c` popup | change that setting |
 | wheel | scroll |
 
-`y` copies via OSC 52, which means the URL lands in your *actual* clipboard even through
+`y` copies via OSC 52, which means the URL or endpoint lands in your *actual* clipboard even through
 nested SSH and tmux, rather than the clipboard of a machine three hops away that nobody can
 paste from.
+
+If `--bind` is anything other than loopback, the header carries a conspicuous `LAN EXPOSED`
+warning for as long as the tunnels are reachable from other machines.
+
+Names, forwarding mode, protocol and local-port pins live together in the host's entry in
+`hosts.yml`, so a hand-edited record is straightforward too:
+
+```yaml
+hosts:
+  devbox:
+    ports:
+      3000:
+        label: frontend
+        scheme: https
+        mode: on
+        local: 13000
+```
 
 And yes, quitting plays a Matrix screen-dissolve. It's about a second long, it's off with
 `--no-dissolve`, and if you press any key it stops immediately. It was in the spec. We regret
@@ -230,6 +249,8 @@ autotun [flags] <destination>
 |---|---|
 | `-i, --identity` | private key (repeatable; implies `IdentitiesOnly`, like ssh(1)) |
 | `-l, --user`, `-p, --port`, `-J, --jump` | override the destination |
+| `--connect-timeout` | SSH connection timeout (default `20s`) |
+| `--wait` | keep retrying until the initial SSH connection succeeds |
 | `-b, --bind` | local bind address (default `127.0.0.1`; `0.0.0.0` to share on your LAN) |
 | `--existing` | also forward what was already listening |
 | `--include` / `--exclude` | port sets, e.g. `3000,8000-9000` |
@@ -238,9 +259,10 @@ autotun [flags] <destination>
 | `--same-port` | never remap; a busy local port is an error |
 | `--interval` | how often to scan (default `2s`) |
 | `--plain` / `--json` | line log / NDJSON (automatic when stdout isn't a TTY) |
-| `--no-detect` | skip the TLS detection handshake |
 | `--no-dissolve` | no green rain. you monster. |
+| `--no-color` | disable color output |
 | `--accept-new-host-key`, `--strict-host-key`, `--insecure-host-key` | host key policy |
+| `-V, --version` | print the version and exit |
 
 `ssh_config` is honored for `HostName`, `User`, `Port`, `IdentityFile`, `IdentitiesOnly`,
 `ProxyJump` and `StrictHostKeyChecking`, so `autotun devbox` works if `ssh devbox` works.
@@ -248,7 +270,7 @@ autotun [flags] <destination>
 ### For scripts and people who like pipes
 
 ```sh
-autotun --json devbox | jq -r 'select(.event=="opened") | .url'
+autotun --json devbox | jq -r 'select(.event=="opened") | (.url // .endpoint)'
 ```
 
 One JSON object per line, for every tunnel opened, closed or failed, and every connection
@@ -281,7 +303,7 @@ a shell in there; `mise run dev:stop` puts it out of its misery.
 internal/sshx        destination + ssh_config resolution, auth, known_hosts, ProxyJump
 internal/probe       the shell prober, four parsers, snapshot diffing, lazy cmdline lookup
 internal/tunnel      policy, port allocation, listeners, direct-tcpip forwarders, counters
-internal/store       remembered per-host/port protocol choices
+internal/config      remembered per-host view, protocol, mode, local port, and label choices
 internal/selfupdate  `autotun update`
 internal/ui          bubbletea model, table, detail pane, matrix dissolve
 internal/app         wiring, reconnect supervision, non-TTY renderers

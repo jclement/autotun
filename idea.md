@@ -43,8 +43,9 @@ TUI, dimmed, **not** forwarded. `a` attaches one on demand; `--existing` forward
 silent remap is how you spend twenty minutes debugging the wrong service. `--same-port`
 makes a collision a visible error instead.
 
-**Sticky ports across reconnects.** The link drops, autotun reconnects with backoff and
-re-allocates each service the local port it had before. Your browser tab keeps working.
+**Sticky ports across reconnects.** The link drops, autotun reconnects with backoff and tries
+to re-allocate each service the local port it had before. The assignment is remembered, though
+the listener is released during the outage and another local process can claim it first.
 
 **Own the forwarding, don't shell out.** We use `golang.org/x/crypto/ssh` and open a
 `direct-tcpip` channel per connection, which is what buys us live byte counters, per-tunnel
@@ -71,23 +72,30 @@ autotun [flags] <destination>
 | `--remote-bind` | `any` | `loopback` = only forward `127.0.0.1`-bound services |
 | `--same-port` | false | never remap; collision is an error |
 | `--interval` | `2s` | remote scan period |
+| `--wait` | false | retry until the initial SSH connection succeeds |
 | `--plain` / `--json` | auto when not a TTY | line log / NDJSON event stream |
 | `--no-dissolve` | | skip the exit animation |
 
 ## TUI
 
 ```
- autotun ▸ devbox                                      6 tunnels · 2 idle · 00:14:22
-
- LOCAL   REMOTE  PROCESS              AGE      CONNS       IN        OUT
- 3000  ← 3000    node vite            14m       2       1.2 MB    340 kB
- 5173  ≠ 5173    node vite --host      9m       0       0 B       0 B
- 8080  ← 8080    python -m http.se…    4m       1        18 kB     92 kB
- 5432    5432    postgres              —        —       pre-existing
+╭─ autotun ▸ devbox ──────────── ● connected (ss) · 3 tunnels · 1 idle · 00:14:22 ─╮
+│    LOCAL     ↓REMOTE  M  VIA      PROCESS                  AGE   CONNS       IN  │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│●    3000  ←     3000     http     frontend · node vite     14m       2   1.2 MB  │
+│◦    5173  ≠     5173  +  https    node vite --host          9m       0      0 B  │
+│     8080  ←     8080     unknown  python3 -m http.se…       4m       1    18 KB  │
+│        —        5432  -  unknown  postgres                            never fwd  │
+╰─ ↑↓ move · enter detail · o open · c config · ? help · esc quit ─────────────────╯
 ```
 
-`↑↓/jk` move · `enter` detail · `o` open in browser · `y` copy URL · `s` sort ·
-`/` filter · `a` attach/detach · `p` pause · `?` help · `esc` quit
+`↑↓/jk` move · `enter` detail · `o` open in browser · `y` copy URL/endpoint · `n` name ·
+`t` http/https · `l` local port · `a` auto/on/off · `c` settings · `/` search ·
+`p` pause new tunnels · `?` help · `esc` quit
+
+Columns drop as the terminal narrows rather than shearing, and a non-loopback `--bind`
+is called out in the header as `LAN EXPOSED`. Losing the link takes over the screen with
+a reconnect panel that holds the tunnels and counts down to the next attempt.
 
 `y` copies via OSC 52, so it reaches your real clipboard even through nested SSH/tmux.
 Quit asks for confirmation, then dissolves the screen in green rain.

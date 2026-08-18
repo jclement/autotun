@@ -17,7 +17,9 @@ type Controller interface {
 	States() []tunnel.State
 	CycleMode(remotePort int) config.Mode
 	CycleScheme(remotePort int) tunnel.Scheme
+	SetScheme(remotePort int, scheme tunnel.Scheme) tunnel.Scheme
 	SetLocalPort(remotePort, local int) error
+	SetLabel(remotePort int, label string) error
 	Policy() tunnel.Policy
 	SetPolicy(tunnel.Policy)
 	// ViewPrefs and SetViewPrefs carry the per-host presentation settings,
@@ -74,6 +76,9 @@ const (
 type Options struct {
 	// Host is the label shown in the header.
 	Host string
+	// Bind is the local listener address, shown prominently when it exposes
+	// tunnels beyond the loopback interface.
+	Bind string
 	// Version is shown in the help box.
 	Version string
 	// Dissolve enables the exit animation.
@@ -97,6 +102,7 @@ const (
 	editorNone editorKind = iota
 	editorFilter
 	editorLocalPort
+	editorPortLabel
 )
 
 // noSelection is the cursor value meaning "nothing highlighted yet".
@@ -125,11 +131,12 @@ type Model struct {
 	input      textInput
 	query      string
 
-	showHelp   bool
-	showDetail bool
-	confirming bool
-	menu       viewMenu
-	prefs      config.ViewPrefs
+	showHelp       bool
+	showDetail     bool
+	protocolPrompt bool
+	confirming     bool
+	menu           viewMenu
+	prefs          config.ViewPrefs
 
 	status StatusMsg
 	// everConnected gates the reconnect screen: the first connection happens
@@ -297,6 +304,13 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
+	if m.protocolPrompt {
+		if scheme := m.protocolChoiceAt(msg.X, msg.Y); scheme != tunnel.SchemeUnknown {
+			return m.chooseProtocol(scheme)
+		}
+		m.protocolPrompt = false
+		return nil
+	}
 	// A click anywhere dismisses a detail or help overlay, the way clicking
 	// outside a popover does everywhere else.
 	if m.showDetail || m.showHelp {
@@ -318,8 +332,11 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	// A click outside an open editor commits it rather than silently editing
 	// something else.
 	if m.editing() {
-		if m.editor == editorLocalPort {
+		switch m.editor {
+		case editorLocalPort:
 			return m.applyLocalPort()
+		case editorPortLabel:
+			return m.applyLabel()
 		}
 		m.closeEditor()
 		return nil
@@ -383,7 +400,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 
 // overlayOpen reports whether a modal layer is covering the table.
 func (m *Model) overlayOpen() bool {
-	return m.confirming || m.showHelp || m.showDetail || m.editing() || m.menu.open
+	return m.confirming || m.showHelp || m.showDetail || m.protocolPrompt || m.editing() || m.menu.open
 }
 
 // isFooterRow reports whether y is the key bar.
@@ -552,6 +569,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.editing() {
 		return m.handleEditorKey(msg)
 	}
+	if m.protocolPrompt {
+		return m.handleProtocolKey(msg)
+	}
 	if m.menu.open {
 		return m.handleMenuKey(msg)
 	}
@@ -614,8 +634,11 @@ func (m *Model) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	case "enter":
-		if m.editor == editorLocalPort {
+		switch m.editor {
+		case editorLocalPort:
 			return m.applyLocalPort()
+		case editorPortLabel:
+			return m.applyLabel()
 		}
 		m.closeEditor()
 		return nil
@@ -626,6 +649,33 @@ func (m *Model) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 		m.reload()
 	}
 	return nil
+}
+
+func (m *Model) handleProtocolKey(msg tea.KeyMsg) tea.Cmd {
+	var scheme tunnel.Scheme
+	switch msg.String() {
+	case "enter", "h", "1":
+		scheme = tunnel.SchemeHTTP
+	case "s", "2":
+		scheme = tunnel.SchemeHTTPS
+	case "esc", "q":
+		m.protocolPrompt = false
+		return nil
+	default:
+		return nil
+	}
+	return m.chooseProtocol(scheme)
+}
+
+func (m *Model) chooseProtocol(scheme tunnel.Scheme) tea.Cmd {
+	st, ok := m.selected()
+	m.protocolPrompt = false
+	if !ok {
+		return m.needSelection()
+	}
+	m.ctrl.SetScheme(st.RemotePort, scheme)
+	m.reload()
+	return m.openSelected()
 }
 
 // closeEditor dismisses the inline editor.
@@ -655,6 +705,33 @@ func (m *Model) openLocalPort() tea.Cmd {
 		m.input.SetValue("")
 	}
 	return nil
+}
+
+// openLabel starts editing the selected port's remembered display name.
+func (m *Model) openLabel() tea.Cmd {
+	st, ok := m.selected()
+	if !ok {
+		return m.needSelection()
+	}
+	m.editor = editorPortLabel
+	m.editorPort = st.RemotePort
+	m.input.SetValue(st.Label)
+	return nil
+}
+
+func (m *Model) applyLabel() tea.Cmd {
+	label := strings.TrimSpace(m.input.Value())
+	port := m.editorPort
+	m.closeEditor()
+	if err := m.ctrl.SetLabel(port, label); err != nil {
+		m.reload()
+		return m.showToast(ToastMsg{Text: err.Error(), Bad: true})
+	}
+	m.reload()
+	if label == "" {
+		return m.showToast(ToastMsg{Text: "remote " + itoa(port) + ": label cleared"})
+	}
+	return m.showToast(ToastMsg{Text: "remote " + itoa(port) + ": named " + label + " (remembered)"})
 }
 
 // applyLocalPort commits the local-port editor.
@@ -731,6 +808,8 @@ func (m *Model) handleTableKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "l":
 		return m.openLocalPort()
+	case "n":
+		return m.openLabel()
 
 	case "?":
 		m.showHelp = !m.showHelp
@@ -793,19 +872,17 @@ func (m *Model) openSelected() tea.Cmd {
 	if !ok {
 		return m.needSelection()
 	}
-	// Opening an unidentified port means guessing at its protocol, and a wrong
-	// guess sends a plaintext request at something that may not want one. Ask
-	// instead: it is one keystroke, and the answer is remembered.
-	if st.Scheme == tunnel.SchemeUnknown {
-		return m.showToast(ToastMsg{
-			Text: "remote " + itoa(st.RemotePort) + ": press t to say http or https first",
-			Bad:  true,
-		})
-	}
-	url := st.URL()
-	if url == "" {
+	if st.Status != tunnel.StatusActive {
 		return m.showToast(ToastMsg{Text: "no tunnel to open", Bad: true})
 	}
+	// Opening an unidentified port needs a protocol choice. The chooser both
+	// opens it and remembers the answer, instead of making the user press two
+	// unrelated shortcuts in sequence.
+	if st.Scheme == tunnel.SchemeUnknown {
+		m.protocolPrompt = true
+		return nil
+	}
+	url := st.URL()
 	if err := m.opts.OpenURL(url); err != nil {
 		return m.showToast(ToastMsg{Text: "open failed: " + err.Error(), Bad: true})
 	}
@@ -817,12 +894,15 @@ func (m *Model) copySelected() tea.Cmd {
 	if !ok {
 		return m.needSelection()
 	}
-	url := st.URL()
-	if url == "" {
+	if st.Status != tunnel.StatusActive {
 		return m.showToast(ToastMsg{Text: "no tunnel to copy", Bad: true})
 	}
-	m.pendingOSC = OSC52(url)
-	return m.showToast(ToastMsg{Text: "copied " + url})
+	value := st.Endpoint()
+	if st.Scheme != tunnel.SchemeUnknown {
+		value = st.URL()
+	}
+	m.pendingOSC = OSC52(value)
+	return m.showToast(ToastMsg{Text: "copied " + value})
 }
 
 func (m *Model) togglePause() tea.Cmd {
@@ -831,7 +911,7 @@ func (m *Model) togglePause() tea.Cmd {
 	m.ctrl.SetPolicy(p)
 	m.reload()
 	if p.Paused {
-		return m.showToast(ToastMsg{Text: "paused: new ports will not be forwarded"})
+		return m.showToast(ToastMsg{Text: "paused: current tunnels stay up; new automatic tunnels will wait"})
 	}
 	return m.showToast(ToastMsg{Text: "resumed"})
 }

@@ -6,6 +6,7 @@ import (
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +49,8 @@ type State struct {
 	// SchemePinned reports that the user chose the scheme, rather than it
 	// being detected. Pinned choices are remembered between runs.
 	SchemePinned bool
+	// Label is the user's remembered name for this host and port.
+	Label string
 
 	// Mode is the user's standing decision for this port.
 	Mode        config.Mode
@@ -67,6 +70,15 @@ type State struct {
 
 // URL returns the address to point a browser at, or "" when not forwarding.
 func (s State) URL() string {
+	if s.Status != StatusActive || s.Scheme == SchemeUnknown {
+		return ""
+	}
+	return s.Scheme.URLScheme() + "://" + s.Endpoint()
+}
+
+// Endpoint returns the local host:port for an active tunnel. It is useful for
+// raw TCP services where inventing an HTTP URL would be misleading.
+func (s State) Endpoint() string {
 	if s.Status != StatusActive {
 		return ""
 	}
@@ -74,7 +86,7 @@ func (s State) URL() string {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "localhost"
 	}
-	return s.Scheme.URLScheme() + "://" + net.JoinHostPort(host, strconv.Itoa(s.LocalPort))
+	return net.JoinHostPort(host, strconv.Itoa(s.LocalPort))
 }
 
 // EventKind classifies a change the manager made.
@@ -121,9 +133,14 @@ type entry struct {
 	err         string
 	mode        config.Mode // auto follows policy; on and off are user decisions
 	pinnedLocal int         // a local port the user chose, or zero
+	label       string      // a human-friendly name remembered for this host/port
 	preexisting bool
-	firstSeen   time.Time
-	missing     int
+	// pausedKeep means this automatic tunnel was already active when forwarding
+	// was paused. It stays up (and returns after a reconnect) while new automatic
+	// tunnels remain suspended.
+	pausedKeep bool
+	firstSeen  time.Time
+	missing    int
 
 	scheme Scheme
 	pinned bool // the user chose the scheme; never overwrite it by observation
@@ -232,6 +249,7 @@ func (m *Manager) Sync(snap probe.Snapshot) {
 				e.pinned = e.scheme != SchemeUnknown
 				e.mode = config.ParseMode(saved.Mode)
 				e.pinnedLocal = saved.Local
+				e.label = saved.Label
 			}
 			m.entries[port] = e
 		}
@@ -350,6 +368,9 @@ func (m *Manager) wantLocked(e *entry) want {
 	case config.ModeOff:
 		return want{skip: SkipOff}
 	}
+	if m.policy.Paused && e.pausedKeep {
+		return want{forward: true}
+	}
 	skip := m.policy.Eval(e.svc, e.preexisting)
 	return want{forward: skip == SkipNone, skip: skip}
 }
@@ -383,6 +404,7 @@ func (m *Manager) stateLocked(e *entry) State {
 		Mode:         e.mode,
 		Preexisting:  e.preexisting,
 		PinnedLocal:  e.pinnedLocal,
+		Label:        e.label,
 		FirstSeen:    e.firstSeen,
 		Scheme:       e.scheme,
 		SchemePinned: e.pinned,
@@ -447,6 +469,16 @@ func (m *Manager) Policy() Policy {
 // SetPolicy replaces the policy and reconciles every known service against it.
 func (m *Manager) SetPolicy(p Policy) {
 	m.mu.Lock()
+	wasPaused := m.policy.Paused
+	if !wasPaused && p.Paused {
+		for _, e := range m.entries {
+			e.pausedKeep = e.mode == config.ModeAuto && e.fwd != nil
+		}
+	} else if wasPaused && !p.Paused {
+		for _, e := range m.entries {
+			e.pausedKeep = false
+		}
+	}
 	m.policy = p
 	now := m.now()
 	var events []Event
@@ -466,6 +498,9 @@ func (m *Manager) CycleMode(remotePort int) config.Mode {
 		return config.ModeAuto
 	}
 	e.mode = e.mode.Next()
+	if e.mode != config.ModeAuto {
+		e.pausedKeep = false
+	}
 	if e.mode != config.ModeOff {
 		e.err = "" // choosing to forward is an explicit retry
 	}
@@ -476,6 +511,39 @@ func (m *Manager) CycleMode(remotePort int) config.Mode {
 	m.persist(remotePort)
 	m.emit(events)
 	return mode
+}
+
+// SetScheme sets a port's protocol directly and remembers it. Unknown clears
+// the pin so passive detection may classify future traffic again.
+func (m *Manager) SetScheme(remotePort int, scheme Scheme) Scheme {
+	scheme = ParseScheme(string(scheme))
+	m.mu.Lock()
+	e, ok := m.entries[remotePort]
+	if !ok {
+		m.mu.Unlock()
+		return SchemeUnknown
+	}
+	e.scheme = scheme
+	e.pinned = scheme != SchemeUnknown
+	m.mu.Unlock()
+	m.persist(remotePort)
+	return scheme
+}
+
+// SetLabel gives a remote port a human-friendly name and remembers it. An
+// empty label restores the process command as the row's primary identity.
+func (m *Manager) SetLabel(remotePort int, label string) error {
+	label = strings.Join(strings.Fields(label), " ")
+	m.mu.Lock()
+	e, ok := m.entries[remotePort]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("remote port %d is not listed", remotePort)
+	}
+	e.label = label
+	m.mu.Unlock()
+	m.persist(remotePort)
+	return nil
 }
 
 // SetLocalPort pins the local port a service is forwarded to. Zero restores
@@ -525,7 +593,7 @@ func (m *Manager) persist(remotePort int) {
 		m.mu.Unlock()
 		return
 	}
-	saved := config.Port{Mode: string(e.mode), Local: e.pinnedLocal}
+	saved := config.Port{Label: e.label, Mode: string(e.mode), Local: e.pinnedLocal}
 	if e.pinned {
 		saved.Scheme = string(e.scheme)
 	}

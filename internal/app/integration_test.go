@@ -442,7 +442,7 @@ func TestEndToEndJSONOutput(t *testing.T) {
 	out, _ := runApp(t, cfg)
 	waitForOutput(t, out, `"event":"opened"`)
 
-	for _, want := range []string{`"type":"tunnel"`, `"remote_port":`, `"url":"http://127.0.0.1:`} {
+	for _, want := range []string{`"type":"tunnel"`, `"remote_port":`, `"endpoint":"127.0.0.1:`} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("the JSON stream is missing %q:\n%s", want, out.String())
 		}

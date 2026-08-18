@@ -13,7 +13,7 @@ func TestRoundTrip(t *testing.T) {
 
 	s := Open(path)
 	s.SetView("devbox", ViewEverything)
-	s.SetPort("devbox", 3000, Port{Scheme: "https", Mode: string(ModeOn), Local: 13000})
+	s.SetPort("devbox", 3000, Port{Label: "frontend", Scheme: "https", Mode: string(ModeOn), Local: 13000})
 	s.SetPort("devbox", 5432, Port{Mode: string(ModeOff)})
 	s.SetPort("other", 8080, Port{Scheme: "http"})
 	if err := s.Save(); err != nil {
@@ -29,7 +29,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	p := got.Port("devbox", 3000)
-	if p.Scheme != "https" || ParseMode(p.Mode) != ModeOn || p.Local != 13000 {
+	if p.Label != "frontend" || p.Scheme != "https" || ParseMode(p.Mode) != ModeOn || p.Local != 13000 {
 		t.Errorf("port 3000 = %+v", p)
 	}
 	if p := got.Port("devbox", 5432); ParseMode(p.Mode) != ModeOff {
@@ -68,6 +68,9 @@ func TestAutoModeIsNotPersisted(t *testing.T) {
 	}
 	if (Port{Local: 1234}).IsZero() {
 		t.Error("a pinned local port is worth keeping")
+	}
+	if (Port{Label: "frontend"}).IsZero() {
+		t.Error("a port label is worth keeping")
 	}
 }
 
@@ -175,7 +178,7 @@ func TestSaveIsANoopWhenUnchanged(t *testing.T) {
 func TestSavedFileIsReadable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	s := Open(path)
-	s.SetPort("devbox", 3000, Port{Scheme: "https", Local: 13000})
+	s.SetPort("devbox", 3000, Port{Label: "frontend", Scheme: "https", Local: 13000})
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +188,7 @@ func TestSavedFileIsReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(data)
-	for _, want := range []string{"# autotun", "hosts:", "devbox:", "3000:", "scheme: https", "local: 13000"} {
+	for _, want := range []string{"# autotun", "hosts:", "devbox:", "3000:", "label: frontend", "scheme: https", "local: 13000"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the saved config is missing %q:\n%s", want, body)
 		}

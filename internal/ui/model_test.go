@@ -20,6 +20,7 @@ type stubController struct {
 	modes    map[int]config.Mode
 	schemes  map[int]tunnel.Scheme
 	locals   map[int]int
+	labels   map[int]string
 	localErr error
 	prefs    config.ViewPrefs
 }
@@ -31,6 +32,7 @@ func newStub(rows ...tunnel.State) *stubController {
 		modes:   map[int]config.Mode{},
 		schemes: map[int]tunnel.Scheme{},
 		locals:  map[int]int{},
+		labels:  map[int]string{},
 		// Tests about layout and keys should see every row they construct;
 		// the default hiding of pre-existing services is covered on its own.
 		prefs: config.ViewPrefs{ShowPreexisting: true, InactiveLast: false, Sort: "port"},
@@ -91,6 +93,30 @@ func (s *stubController) CycleScheme(port int) tunnel.Scheme {
 		}
 	}
 	return next
+}
+
+func (s *stubController) SetScheme(port int, scheme tunnel.Scheme) tunnel.Scheme {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.schemes[port] = scheme
+	for i := range s.rows {
+		if s.rows[i].RemotePort == port {
+			s.rows[i].Scheme = scheme
+		}
+	}
+	return scheme
+}
+
+func (s *stubController) SetLabel(port int, label string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.labels[port] = label
+	for i := range s.rows {
+		if s.rows[i].RemotePort == port {
+			s.rows[i].Label = label
+		}
+	}
+	return nil
 }
 
 func (s *stubController) States() []tunnel.State {
@@ -504,6 +530,24 @@ func TestModelSetLocalPortRejectsNonsense(t *testing.T) {
 	}
 }
 
+func TestModelSetsAndClearsPortLabel(t *testing.T) {
+	stub := newStub(row(3000, 3000, "node /app/server.js"))
+	m := newModel(t, stub)
+
+	send(m, "down", "n", "f", "r", "o", "n", "t", "e", "n", "d", "enter")
+	if got := stub.labels[3000]; got != "frontend" {
+		t.Errorf("label = %q", got)
+	}
+	if !strings.Contains(plainView(m), "frontend") {
+		t.Errorf("label not shown in table:\n%s", plainView(m))
+	}
+
+	send(m, "n", "ctrl+u", "enter")
+	if got := stub.labels[3000]; got != "" {
+		t.Errorf("cleared label = %q", got)
+	}
+}
+
 func TestModelLocalPortEditorCanBeCancelled(t *testing.T) {
 	stub := newStub(row(3000, 3000, "node"))
 	m := newModel(t, stub)
@@ -639,7 +683,7 @@ func TestModelCopyEmitsOSC52(t *testing.T) {
 	if m.pendingOSC == "" {
 		t.Fatal("y should queue a clipboard sequence")
 	}
-	if m.pendingOSC != OSC52("http://127.0.0.1:3000") {
+	if m.pendingOSC != OSC52("127.0.0.1:3000") {
 		t.Errorf("pendingOSC = %q", m.pendingOSC)
 	}
 	if !strings.HasPrefix(m.View(), m.pendingOSC) {
@@ -653,6 +697,16 @@ func TestModelCopyEmitsOSC52(t *testing.T) {
 	}
 }
 
+func TestModelCopyKnownWebServiceUsesURL(t *testing.T) {
+	web := row(3000, 3000, "node")
+	web.Scheme = tunnel.SchemeHTTPS
+	m := newModel(t, newStub(web))
+	send(m, "down", "y")
+	if m.pendingOSC != OSC52("https://127.0.0.1:3000") {
+		t.Errorf("pendingOSC = %q", m.pendingOSC)
+	}
+}
+
 func TestModelDetailOverlay(t *testing.T) {
 	m := newModel(t, newStub(row(3000, 3000, "node /app/server.js")))
 
@@ -661,7 +715,7 @@ func TestModelDetailOverlay(t *testing.T) {
 		t.Fatal("enter should open the detail pane")
 	}
 	view := m.View()
-	for _, want := range []string{"remote :3000", "/app/server.js", "http://127.0.0.1:3000"} {
+	for _, want := range []string{"remote :3000", "/app/server.js", "127.0.0.1:3000"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("the detail pane is missing %q", want)
 		}

@@ -1,12 +1,16 @@
 package sshx
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -216,5 +220,102 @@ func TestKnownHostsFileIsCreated(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".ssh", "known_hosts")); err != nil {
 		t.Errorf("known_hosts should have been created: %v", err)
+	}
+}
+
+// ---- Algorithm preference ----
+
+// testECDSAKey generates a throwaway ECDSA host key, for the cases where a
+// host offers a key type known_hosts has never seen.
+func testECDSAKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+// record trusts key for devbox the way a first connection would, so the rest
+// of the test can ask what known_hosts now holds.
+func record(t *testing.T, key ssh.PublicKey) {
+	t.Helper()
+	cb, err := HostKeyCallback(HostKeyAcceptNew, &stubPrompter{})
+	if err != nil {
+		t.Fatalf("HostKeyCallback: %v", err)
+	}
+	if err := cb("devbox:22", remoteAddr(t), key); err != nil {
+		t.Fatalf("recording a host key: %v", err)
+	}
+}
+
+// The regression this whole thing exists for: a host with both an Ed25519 and
+// an ECDSA key, recorded as Ed25519, must not be asked for its ECDSA key.
+func TestHostKeyAlgorithmsPrefersRecordedTypes(t *testing.T) {
+	isolatedHome(t)
+	record(t, testKey(t)) // ed25519
+
+	algos := HostKeyAlgorithms(HostKeyAsk, "devbox:22")
+	if len(algos) == 0 || algos[0] != ssh.KeyAlgoED25519 {
+		t.Fatalf("algorithms = %v, want the recorded ssh-ed25519 first", algos)
+	}
+	// The others stay on the list, so a genuine key rotation still negotiates
+	// and is reported honestly instead of failing to agree on an algorithm.
+	if !slices.Contains(algos, ssh.KeyAlgoECDSA256) {
+		t.Errorf("algorithms = %v, want the remaining types kept as fallbacks", algos)
+	}
+}
+
+func TestHostKeyAlgorithmsExpandsRSA(t *testing.T) {
+	isolatedHome(t)
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record(t, pub)
+
+	algos := HostKeyAlgorithms(HostKeyAsk, "devbox:22")
+	for _, want := range []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA} {
+		if i := slices.Index(algos, want); i < 0 || i > 2 {
+			t.Errorf("algorithms = %v, want %s among the first three", algos, want)
+		}
+	}
+}
+
+func TestHostKeyAlgorithmsWithNothingToPreferAreUnset(t *testing.T) {
+	isolatedHome(t)
+	if algos := HostKeyAlgorithms(HostKeyAsk, "devbox:22"); algos != nil {
+		t.Errorf("an unknown host should express no preference, got %v", algos)
+	}
+	record(t, testKey(t))
+	if algos := HostKeyAlgorithms(HostKeyNone, "devbox:22"); algos != nil {
+		t.Errorf("verification is off, so there is nothing to prefer, got %v", algos)
+	}
+}
+
+// A key type we have not recorded for a known host is a new key, not a
+// changed one — ssh(1) only compares within one algorithm, and so do we.
+func TestHostKeyOfANewTypeIsNotAChangedKey(t *testing.T) {
+	isolatedHome(t)
+	record(t, testKey(t)) // ed25519
+
+	p := &stubPrompter{confirm: true}
+	cb, err := HostKeyCallback(HostKeyAsk, p)
+	if err != nil {
+		t.Fatalf("HostKeyCallback: %v", err)
+	}
+	if err := cb("devbox:22", remoteAddr(t), testECDSAKey(t)); err != nil {
+		t.Fatalf("an unrecorded key type should be offered for approval: %v", err)
+	}
+	if len(p.notices) == 0 || !strings.Contains(p.notices[0], "different key type") {
+		t.Errorf("the user should be told the host is known by another key type: %v", p.notices)
 	}
 }

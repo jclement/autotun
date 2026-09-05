@@ -1,11 +1,14 @@
 package sshx
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -113,16 +116,21 @@ func HostKeyCallback(policy HostKeyPolicy, prompter Prompter) (ssh.HostKeyCallba
 		if !errors.As(err, &ke) {
 			return err
 		}
-		// A populated Want list means the host is known but presented a
-		// different key. That is never auto-accepted.
-		if len(ke.Want) > 0 {
+		// Only a recorded key of the *same* algorithm can contradict this
+		// one. Records of other algorithms mean the host has a key type we
+		// have not seen before, which is a new key, not a changed one.
+		if changed := keysOfType(ke.Want, key); len(changed) > 0 {
 			return fmt.Errorf(
 				"REMOTE HOST IDENTIFICATION HAS CHANGED for %s\n"+
-					"  offered %s key %s\n"+
+					"  offered  %s key %s\n"+
+					"  recorded %s key %s (%s:%d)\n"+
 					"This may be a man-in-the-middle attack, or the host may have been rebuilt.\n"+
 					"If you trust the change, remove the old key with:\n"+
 					"  ssh-keygen -R %s",
-				hostname, key.Type(), ssh.FingerprintSHA256(key), knownhosts.Normalize(hostname))
+				hostname, key.Type(), ssh.FingerprintSHA256(key),
+				changed[0].Key.Type(), ssh.FingerprintSHA256(changed[0].Key),
+				changed[0].Filename, changed[0].Line,
+				knownhosts.Normalize(hostname))
 		}
 
 		switch policy {
@@ -132,9 +140,13 @@ func HostKeyCallback(policy HostKeyPolicy, prompter Prompter) (ssh.HostKeyCallba
 			if prompter == nil {
 				return fmt.Errorf("host %s is not in known_hosts and there is no terminal to confirm on", hostname)
 			}
-			prompter.Notice(fmt.Sprintf(
+			notice := fmt.Sprintf(
 				"The authenticity of host '%s' can't be established.\n%s key fingerprint is %s.",
-				hostname, key.Type(), ssh.FingerprintSHA256(key)))
+				hostname, key.Type(), ssh.FingerprintSHA256(key))
+			if len(ke.Want) > 0 {
+				notice += fmt.Sprintf("\nThis host is already known by a different key type (%s).", ke.Want[0].Key.Type())
+			}
+			prompter.Notice(notice)
 			ok, cerr := prompter.Confirm("Are you sure you want to continue connecting?")
 			if cerr != nil {
 				return cerr
@@ -169,4 +181,104 @@ func appendKnownHost(path, hostname string, remote net.Addr, key ssh.PublicKey) 
 		return fmt.Errorf("recording host key: %w", err)
 	}
 	return nil
+}
+
+// ---- Algorithm preference ----
+
+// textAddr carries a host:port string for a known_hosts lookup made outside
+// any live connection.
+type textAddr string
+
+func (a textAddr) Network() string { return "tcp" }
+func (a textAddr) String() string  { return string(a) }
+
+// recordedKeys returns every key known_hosts holds for addr ("host:port").
+// There is no lookup API, so it asks the ordinary callback about a key no
+// host could possibly be using: the resulting KeyError lists what it wanted
+// instead, which is exactly the set of recorded keys.
+func recordedKeys(addr string) []knownhosts.KnownKey {
+	paths := knownHostsPaths()
+	if len(paths) == 0 {
+		return nil
+	}
+	verify, err := knownhosts.New(paths...)
+	if err != nil {
+		return nil
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil
+	}
+	probe, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return nil
+	}
+	var ke *knownhosts.KeyError
+	if errors.As(verify(addr, textAddr(addr), probe), &ke) {
+		return ke.Want
+	}
+	return nil
+}
+
+// signatureAlgos expands a recorded key type into the host key algorithms
+// that can carry it. RSA keys are recorded as plain "ssh-rsa" but every
+// current server signs with a SHA-2 variant, so all three have to be offered
+// for the one recorded key to be usable.
+func signatureAlgos(keyType string) []string {
+	switch keyType {
+	case ssh.KeyAlgoRSA:
+		return []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+	case ssh.CertAlgoRSAv01:
+		return []string{ssh.CertAlgoRSASHA512v01, ssh.CertAlgoRSASHA256v01, ssh.CertAlgoRSAv01}
+	default:
+		return []string{keyType}
+	}
+}
+
+// HostKeyAlgorithms returns the host key algorithms to advertise when
+// connecting to addr ("host:port"): the ones already in known_hosts first,
+// then the rest.
+//
+// Without this the client offers its own global preference — ECDSA ahead of
+// Ed25519 — and a server holding both will hand back the ECDSA key even
+// though known_hosts records the Ed25519 one. The host is then reported as
+// unrecognized, or worse as changed, for no reason at all. ssh(1) avoids that
+// by ordering the algorithms it asks for by what it already trusts, and so do
+// we. Everything else stays on the list behind them, so a host that genuinely
+// rotated to a new key type still negotiates and gets the honest "this key is
+// new" conversation instead of failing to agree on an algorithm.
+func HostKeyAlgorithms(policy HostKeyPolicy, addr string) []string {
+	if policy == HostKeyNone {
+		return nil
+	}
+	var algos []string
+	add := func(candidates []string) {
+		for _, algo := range candidates {
+			if !slices.Contains(algos, algo) {
+				algos = append(algos, algo)
+			}
+		}
+	}
+	for _, known := range recordedKeys(addr) {
+		add(signatureAlgos(known.Key.Type()))
+	}
+	if len(algos) == 0 {
+		return nil // Nothing recorded: no opinion, leave the default order.
+	}
+	add(ssh.SupportedAlgorithms().HostKeys)
+	add(ssh.InsecureAlgorithms().HostKeys)
+	return algos
+}
+
+// keysOfType picks out the recorded keys using the same algorithm as key.
+// Only those can say anything about whether the host's identity changed;
+// a recorded key of a different type is simply a different key.
+func keysOfType(known []knownhosts.KnownKey, key ssh.PublicKey) []knownhosts.KnownKey {
+	var same []knownhosts.KnownKey
+	for _, k := range known {
+		if k.Key.Type() == key.Type() {
+			same = append(same, k)
+		}
+	}
+	return same
 }

@@ -106,11 +106,12 @@ func dialSSH(ctx context.Context, d *Destination, opts ConnectOptions, via *ssh.
 	defer cleanup()
 
 	cfg := &ssh.ClientConfig{
-		User:            d.User,
-		Auth:            methods,
-		HostKeyCallback: hostKey,
-		Timeout:         opts.Timeout,
-		ClientVersion:   opts.ClientVersion,
+		User:              d.User,
+		Auth:              methods,
+		HostKeyCallback:   hostKey,
+		HostKeyAlgorithms: HostKeyAlgorithms(opts.HostKeyPolicy, d.Addr()),
+		Timeout:           opts.Timeout,
+		ClientVersion:     opts.ClientVersion,
 	}
 
 	var conn net.Conn

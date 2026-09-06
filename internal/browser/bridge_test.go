@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,11 +39,27 @@ func (h *localHost) ListenUnix(path string) (net.Listener, error) {
 	return net.Listen("unix", path)
 }
 
+// requirePOSIX skips a test that needs this machine to stand in for the
+// remote. The bridge itself is a unix socket on the far end, so a Windows
+// client can use it perfectly well — but faking the remote half locally, which
+// is how these tests get their coverage, needs a POSIX shell and a unix socket
+// path here.
+func requirePOSIX(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("no POSIX shell or unix socket path to fake a remote with")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no POSIX shell to install the shim with")
+	}
+}
+
 // shortHome returns a temp directory with a short path, because a unix socket
 // path is capped at ~104 bytes and the usual per-test temp directory spends
 // most of that budget before we start.
 func shortHome(t *testing.T) string {
 	t.Helper()
+	requirePOSIX(t)
 	home, err := os.MkdirTemp("/tmp", "autotun-browser")
 	if err != nil {
 		t.Fatal(err)
@@ -55,9 +72,6 @@ func shortHome(t *testing.T) string {
 // receives.
 func installed(t *testing.T) (*Bridge, string, <-chan string) {
 	t.Helper()
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no POSIX shell to install the shim with")
-	}
 	home := shortHome(t)
 	urls := make(chan string, 4)
 

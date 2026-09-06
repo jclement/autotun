@@ -253,6 +253,13 @@ func (c *Client) Dial(network, addr string) (net.Conn, error) {
 	return c.ssh.Dial(network, addr)
 }
 
+// ListenUnix listens on a unix socket on the remote host, over this same
+// connection. The remote sshd creates the socket file, so it must not already
+// exist, and the server needs AllowStreamLocalForwarding (the default).
+func (c *Client) ListenUnix(path string) (net.Listener, error) {
+	return c.ssh.ListenUnix(path)
+}
+
 // Run pipes a script into the remote `sh -s` and streams its stdout, satisfying
 // probe.Runner. It returns when the command exits or ctx is canceled.
 func (c *Client) Run(ctx context.Context, script string, stdout io.Writer) error {

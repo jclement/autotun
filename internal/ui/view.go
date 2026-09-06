@@ -994,6 +994,14 @@ func (m *Model) helpBox() string {
 			b.WriteString("  " + t.Key.Render(pad(k[0], 14)) + t.KeyDesc.Render(k[1]) + "\n")
 		}
 	}
+	// The bridge is only half installed until a remote shell points at it,
+	// and that half is the user's to do — once, from here.
+	if len(m.opts.BrowserSetup) > 0 {
+		b.WriteString("\n" + t.Meta.Render("browser bridge — add to your shell rc on the remote, once") + "\n")
+		for _, line := range m.opts.BrowserSetup {
+			b.WriteString("  " + t.KeyDesc.Render(line) + "\n")
+		}
+	}
 	b.WriteString("\n" + t.Faintest.Render("? or esc to close"))
 	return t.Box.Render(b.String())
 }

@@ -24,6 +24,7 @@ type Config struct {
 	StrictHost     bool
 	ConnectTimeout time.Duration
 	Wait           bool
+	Browser        bool
 
 	// Forwarding
 	Bind       string
@@ -60,6 +61,7 @@ func (c *Config) Flags(name string, errOut io.Writer) *pflag.FlagSet {
 	fs.BoolVar(&c.AcceptNewHost, "accept-new-host-key", false, "trust unknown host keys without asking")
 	fs.BoolVar(&c.StrictHost, "strict-host-key", false, "refuse hosts missing from known_hosts")
 	fs.BoolVar(&c.InsecureHost, "insecure-host-key", false, "skip host key verification entirely")
+	fs.BoolVar(&c.Browser, "browser", false, "open URLs the remote asks for in your local browser")
 
 	fs.StringVarP(&c.Bind, "bind", "b", "127.0.0.1", "local address to bind forwarded ports to")
 	fs.BoolVar(&c.Existing, "existing", false, "also forward ports already listening at connect time")

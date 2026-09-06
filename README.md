@@ -258,6 +258,7 @@ autotun [flags] <destination>
 | `--remote-bind loopback` | only forward services bound to remote loopback |
 | `--same-port` | never remap; a busy local port is an error |
 | `--interval` | how often to scan (default `2s`) |
+| `--browser` | open URLs the remote asks for in your local browser |
 | `--plain` / `--json` | line log / NDJSON (automatic when stdout isn't a TTY) |
 | `--no-dissolve` | no green rain. you monster. |
 | `--no-color` | disable color output |
@@ -266,6 +267,53 @@ autotun [flags] <destination>
 
 `ssh_config` is honored for `HostName`, `User`, `Port`, `IdentityFile`, `IdentitiesOnly`,
 `ProxyJump` and `StrictHostKeyChecking`, so `autotun devbox` works if `ssh devbox` works.
+
+### Opening a browser: `--browser`
+
+`vite --open`, `gh auth login`, `wrangler login`, `jupyter notebook` — all of them try to open
+a browser, and on a remote box that means either nothing at all or a hopeful "Couldn't find a
+suitable web browser". `--browser` sends the URL back to the machine you are sitting at, with
+the port rewritten to wherever autotun actually put it:
+
+```sh
+autotun --browser devbox
+```
+
+Once, in your shell rc **on the remote**:
+
+```sh
+export BROWSER="$HOME/.autotun/open"
+export PATH="$HOME/.autotun/bin:$PATH"
+```
+
+That is the only thing you ever have to do by hand, and it is the same two lines forever —
+every later autotun session is picked up automatically. Only shells started *after* you add
+them are affected, so re-source it, or open a new one, before expecting it to work.
+
+How it works: autotun writes a small shell script to `~/.autotun/open` on the remote, symlinks
+it in as `xdg-open`, `sensible-browser`, `open` and friends, and listens on a unix socket
+reverse-forwarded over the SSH connection it already has. The socket lives in your own runtime
+directory with `0600` permissions, so reaching it means already being you on that box, and
+requests carry a per-session nonce on top of that. With no autotun running, the script falls
+through to whatever the remote would have done on its own — which is why it is safe to leave
+in `$BROWSER` permanently.
+
+Then:
+
+- a URL for a forwarded port is rewritten to its local one — remote `5173` becomes
+  `localhost:5174` if that is where it landed;
+- a port that policy is skipping — a dev server that was already running when autotun
+  connected — is forwarded anyway, because naming a port is more specific than `--existing`;
+- a login callback on a remapped port is a broken redirect, so autotun takes the original
+  local port back when it is free, and says so plainly when it is not (`--same-port` avoids
+  the question entirely);
+- a public URL — an OAuth consent screen — is opened unchanged;
+- a loopback port that is not forwarded at all is refused rather than pointed at whatever
+  *your* machine is running there.
+
+Requires `AllowStreamLocalForwarding` on the remote sshd (the default) and one of `nc`,
+`socat` or `python3` for the script to reach the socket. Two autotun sessions against the same
+host share one shim: the newest one wins.
 
 ### For scripts and people who like pipes
 

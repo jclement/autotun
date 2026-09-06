@@ -93,6 +93,10 @@ type Options struct {
 	OpenURL func(string) error
 	// Retry asks the supervisor to reconnect immediately.
 	Retry func()
+	// BrowserSetup lists the shell rc lines that point a remote shell at the
+	// browser shim. Shown in the help box when the bridge is running, since
+	// the alt screen is no place to have missed a one-time instruction.
+	BrowserSetup []string
 }
 
 // editorKind names the inline text entry currently open.

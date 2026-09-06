@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/jclement/autotun/internal/browser"
 	"github.com/jclement/autotun/internal/buildinfo"
 	"github.com/jclement/autotun/internal/config"
 	"github.com/jclement/autotun/internal/probe"
@@ -49,6 +50,9 @@ const (
 	// keepAlive doubles as the per-probe timeout, so an outage is noticed in
 	// roughly keepAlive × keepaliveMisses rather than whenever TCP gives up.
 	keepAlive = 8 * time.Second
+	// browserPoll is how often a pending browser request re-checks for its
+	// tunnel while the prober catches up.
+	browserPoll = 250 * time.Millisecond
 )
 
 // Run executes autotun. It returns nil on a clean exit.
@@ -151,6 +155,29 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 			}
 		},
 	}
+	sup.toast = func(msg ui.ToastMsg) {
+		if prog != nil {
+			prog.Send(msg)
+			return
+		}
+		fmt.Fprintln(iostreams.Err, "autotun:", msg.Text)
+	}
+	if cfg.Browser {
+		sup.router = &urlRouter{
+			tunnels: mgr,
+			open:    ui.OpenURL,
+			notify:  sup.toast,
+			bind:    cfg.Bind,
+			poll:    browserPoll,
+		}
+	}
+
+	if cfg.Browser && !useTUI {
+		fmt.Fprintf(iostreams.Err, "browser bridge: add these to your shell rc on %s (once)\n", host)
+		for _, line := range browser.SetupLines() {
+			fmt.Fprintln(iostreams.Err, " ", line)
+		}
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -159,12 +186,17 @@ func Run(ctx context.Context, cfg Config, iostreams IO) error {
 		return runHeadless(ctx, cancel, sup, iostreams)
 	}
 
+	var browserSetup []string
+	if cfg.Browser {
+		browserSetup = browser.SetupLines()
+	}
 	model := ui.New(&uiController{Manager: mgr, settings: settings, host: host}, ui.Options{
-		Host:     host,
-		Bind:     cfg.Bind,
-		Version:  buildinfo.Version(),
-		Dissolve: !cfg.NoDissolve,
-		Retry:    sup.retryNow,
+		BrowserSetup: browserSetup,
+		Host:         host,
+		Bind:         cfg.Bind,
+		Version:      buildinfo.Version(),
+		Dissolve:     !cfg.NoDissolve,
+		Retry:        sup.retryNow,
 	})
 	prog = tea.NewProgram(model,
 		tea.WithAltScreen(),
@@ -237,6 +269,12 @@ type supervisor struct {
 	mgr      *tunnel.Manager
 	renderer Renderer
 	status   func(ui.StatusMsg)
+	// toast surfaces one-off notices — a browser request, a bridge that
+	// could not be installed — without touching the connection indicator.
+	toast func(ui.ToastMsg)
+	// router handles browser requests relayed from the remote. Nil unless
+	// --browser is set.
+	router *urlRouter
 
 	// retry lets the UI cut short the wait before the next attempt. Buffered,
 	// so asking twice while already retrying is harmless.
@@ -314,6 +352,8 @@ func (s *supervisor) run(ctx context.Context) error {
 		backoff = backoffStart
 		s.report(ui.StatusMsg{State: ui.Probing})
 
+		bridge := s.startBrowser(ctx, client)
+
 		mon := probe.NewMonitor(client, s.cfg.Interval)
 		err := mon.Run(ctx,
 			func(info probe.Info) {
@@ -324,6 +364,9 @@ func (s *supervisor) run(ctx context.Context) error {
 			},
 		)
 
+		if bridge != nil {
+			_ = bridge.Close()
+		}
 		s.mgr.SetDialer(nil)
 		if c := s.takeClient(); c != nil {
 			c.Close()
@@ -350,6 +393,29 @@ func (s *supervisor) run(ctx context.Context) error {
 		backoff = nextBackoff(backoff)
 	}
 	return nil
+}
+
+// startBrowser installs the browser bridge over a freshly established
+// connection. A failure is worth a notice but never fatal: forwarding ports
+// is what the user actually came for.
+func (s *supervisor) startBrowser(ctx context.Context, client *sshx.Client) *browser.Bridge {
+	if s.router == nil || client == nil {
+		return nil
+	}
+	bridge, err := browser.Install(ctx, client, browser.Options{Open: s.router.Open})
+	if err != nil {
+		if ctx.Err() == nil {
+			s.notify(ui.ToastMsg{Text: "browser bridge unavailable: " + err.Error(), Bad: true})
+		}
+		return nil
+	}
+	return bridge
+}
+
+func (s *supervisor) notify(msg ui.ToastMsg) {
+	if s.toast != nil {
+		s.toast(msg)
+	}
 }
 
 func (s *supervisor) report(msg ui.StatusMsg) {

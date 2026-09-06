@@ -513,6 +513,36 @@ func (m *Manager) CycleMode(remotePort int) config.Mode {
 	return mode
 }
 
+// ForwardNow opens a tunnel for a listed port that policy is skipping, for
+// this session only. Naming one port in a browser request is more specific
+// than a blanket rule like --existing or --min-port, so it wins; a port the
+// user switched off is left alone, because that decision was about this port
+// in particular.
+func (m *Manager) ForwardNow(remotePort int) error {
+	m.mu.Lock()
+	e, ok := m.entries[remotePort]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("remote port %d is not listed", remotePort)
+	}
+	if e.mode == config.ModeOff {
+		m.mu.Unlock()
+		return fmt.Errorf("remote port %d is switched off", remotePort)
+	}
+	e.mode = config.ModeOn
+	e.pausedKeep = false
+	e.err = ""
+	events := m.applyLocked(e, m.now())
+	failed := e.err
+	m.mu.Unlock()
+
+	m.emit(events)
+	if failed != "" {
+		return errors.New(failed)
+	}
+	return nil
+}
+
 // SetScheme sets a port's protocol directly and remembers it. Unknown clears
 // the pin so passive detection may classify future traffic again.
 func (m *Manager) SetScheme(remotePort int, scheme Scheme) Scheme {
@@ -550,6 +580,19 @@ func (m *Manager) SetLabel(remotePort int, label string) error {
 // the default of mirroring the remote port. The tunnel is reopened so the
 // change takes effect immediately.
 func (m *Manager) SetLocalPort(remotePort, local int) error {
+	return m.setLocalPort(remotePort, local, true)
+}
+
+// TryLocalPort moves a tunnel to a specific local port for this session only,
+// without remembering the choice. It is what a browser request needs: a login
+// flow's callback has to arrive on the exact port the remote baked into its
+// redirect URI, but the throwaway high port it picked this once should not be
+// pinned for that host forever.
+func (m *Manager) TryLocalPort(remotePort, local int) error {
+	return m.setLocalPort(remotePort, local, false)
+}
+
+func (m *Manager) setLocalPort(remotePort, local int, remember bool) error {
 	if local < 0 || local > 65535 {
 		return fmt.Errorf("local port %d is out of range", local)
 	}
@@ -574,7 +617,9 @@ func (m *Manager) SetLocalPort(remotePort, local int) error {
 	failed := e.err
 	m.mu.Unlock()
 
-	m.persist(remotePort)
+	if remember {
+		m.persist(remotePort)
+	}
 	m.emit(events)
 	if failed != "" {
 		return errors.New(failed)

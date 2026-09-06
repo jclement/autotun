@@ -761,3 +761,91 @@ func waitUntil(t *testing.T, cond func() bool, what string) {
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+// A browser request relocates a tunnel for the session only: a login flow's
+// throwaway callback port should not become a permanent pin for that host.
+func TestManagerTryLocalPortIsNotRemembered(t *testing.T) {
+	echo := newEchoServer(t)
+	memory := newMemoryStore()
+	m := New(NewAllocator("127.0.0.1", false), &fixedDialer{addr: echo.addr()}, Options{
+		Policy: DefaultPolicy(), Host: "devbox", Settings: memory,
+	})
+	defer m.Close()
+
+	remote, moved := freePort(t), freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(remote))
+
+	if err := m.TryLocalPort(remote, moved); err != nil {
+		t.Fatalf("TryLocalPort: %v", err)
+	}
+	if got := stateFor(t, m, remote).LocalPort; got != moved {
+		t.Errorf("local port = %d, want the tunnel moved to %d", got, moved)
+	}
+	if got := roundTrip(t, moved, "hi"); got != "HI" {
+		t.Errorf("round trip on the relocated port = %q, want HI", got)
+	}
+	if saved := memory.Port("devbox", remote).Local; saved != 0 {
+		t.Errorf("settings recorded local port %d; a temporary move should not persist", saved)
+	}
+
+	// The choice a user makes deliberately, by contrast, is remembered.
+	if err := m.SetLocalPort(remote, moved); err != nil {
+		t.Fatalf("SetLocalPort: %v", err)
+	}
+	if saved := memory.Port("devbox", remote).Local; saved != moved {
+		t.Errorf("settings recorded %d, want the pinned %d", saved, moved)
+	}
+}
+
+// An explicit request beats a blanket policy: --existing skips services that
+// were already up, but asking for one by port is not a blanket anything.
+func TestManagerForwardNowOverridesASkip(t *testing.T) {
+	m, _, _ := newTestManager(t, DefaultPolicy())
+	port := freePort(t)
+
+	// The first snapshot is the baseline, so this service counts as
+	// pre-existing and is skipped.
+	m.Sync(snapshotOf(port))
+	if st := stateFor(t, m, port); st.Status != StatusSkipped || st.Skip != SkipPreexising {
+		t.Fatalf("status = %q / %q, want a pre-existing skip", st.Status, st.Skip)
+	}
+
+	if err := m.ForwardNow(port); err != nil {
+		t.Fatalf("ForwardNow: %v", err)
+	}
+	if st := stateFor(t, m, port); st.Status != StatusActive {
+		t.Fatalf("status = %q, want the tunnel opened", st.Status)
+	}
+	if got := roundTrip(t, port, "hi"); got != "HI" {
+		t.Errorf("round trip = %q, want HI", got)
+	}
+}
+
+func TestManagerForwardNowLeavesADeliberateOffAlone(t *testing.T) {
+	m, _, _ := newTestManager(t, DefaultPolicy())
+	port := freePort(t)
+	m.Sync(probe.Snapshot{})
+	m.Sync(snapshotOf(port))
+
+	// auto → on → off.
+	m.CycleMode(port)
+	m.CycleMode(port)
+	if st := stateFor(t, m, port); st.Skip != SkipOff {
+		t.Fatalf("skip = %q, want the port switched off", st.Skip)
+	}
+
+	if err := m.ForwardNow(port); err == nil {
+		t.Error("a port the user switched off was forwarded anyway")
+	}
+	if st := stateFor(t, m, port); st.Status == StatusActive {
+		t.Error("the tunnel was opened despite being switched off")
+	}
+}
+
+func TestManagerForwardNowRejectsAnUnlistedPort(t *testing.T) {
+	m, _, _ := newTestManager(t, DefaultPolicy())
+	if err := m.ForwardNow(9999); err == nil {
+		t.Error("an unlisted port should be rejected")
+	}
+}
